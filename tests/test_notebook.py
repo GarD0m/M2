@@ -11,7 +11,11 @@ def test_notebook_blocks_compile_and_are_unexecuted():
     assert len(cells) == 9
     for c in cells:
         assert c["outputs"] == [] and c["execution_count"] is None
-        compile("".join(c["source"]), c["id"], "exec")
+        source = "".join(c["source"])
+        python = "\n".join("pass" if line.startswith("%pip ") else line for line in source.splitlines())
+        compile(python, c["id"], "exec")
+    code = "\n".join("".join(c["source"]) for c in cells)
+    assert "%pip install" in code and ".venv" not in code
 
 
 def test_bundled_tokenizer_matches_metadata():

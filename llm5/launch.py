@@ -67,10 +67,9 @@ def check_runtime():
     if commit != MAXTEXT_COMMIT or dirty.strip():
         raise RuntimeError("MaxText checkout differs from the tested source revision")
     devices = jax.devices()
-    if len(devices) != 1 or jax.process_count() != 1 or devices[0].platform != "tpu":
-        raise RuntimeError(f"Expected one local TPU device; found {devices}")
-    if "v6" not in devices[0].device_kind.lower():
-        raise RuntimeError(f"Expected TPU v6e, found {devices[0].device_kind}")
+    if not devices or any(d.platform != "tpu" for d in devices):
+        raise RuntimeError("Select a TPU runtime in Colab")
+    return len(devices)
 
 
 def checkpoint_items(cfg, step):
@@ -90,7 +89,9 @@ def main():
     manifest = load_manifest(args.manifest)
     if args.execute:
         os.environ.setdefault("JAX_PLATFORMS", "tpu")
-        check_runtime()
+        count = check_runtime()
+        if count != manifest["device_count"]:
+            raise RuntimeError(f"Regenerate plan with --device-count {count} to keep the global token batch unchanged")
     for s in manifest["stages"]:
         if args.check_data or args.execute:
             check_data(s)

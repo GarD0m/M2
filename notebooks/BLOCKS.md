@@ -4,28 +4,33 @@
 
 ```python
 from pathlib import Path
-import os, subprocess, sys, sysconfig
+import os, subprocess, sys
 
 REPO = next((p for p in (Path.cwd(), Path.cwd().parent)
-             if (p / "configs/curriculum.yml").exists()), Path.home() / "M2")
+             if (p / "configs/curriculum.yml").exists()), Path("/content/M2"))
 if not (REPO / ".git").exists():
     subprocess.run(["git", "clone", "https://github.com/GarD0m/M2.git", str(REPO)], check=True)
 os.chdir(REPO)
 print(REPO)
 ```
 
-## 2. Install on the existing v6e-1 VM
+## 2. Install directly into Colab with pip
 
 ```python
-# Linux TPU VM only. This does not create cloud resources.
-subprocess.run([sys.executable, "-m", "pip", "install", "uv"], check=True)
-os.environ["PATH"] = os.pathsep.join([
-    sysconfig.get_path("scripts"), str(Path.home() / ".local/bin"), os.environ["PATH"]])
-subprocess.run(["bash", "scripts/setup_tpu.sh"], check=True)
-PYTHON = str(REPO / ".venv-tpu/bin/python")
+# Select a TPU runtime. No virtual environment or TPU model restriction.
+MAXTEXT = REPO / "upstream/maxtext"
+PIN = "ce608b918c4fdfbfdb62f5a7976d2e15e4fdd720"
+if not (MAXTEXT / ".git").exists():
+    subprocess.run(["git", "clone", "https://github.com/AI-Hypercomputer/maxtext.git", str(MAXTEXT)], check=True)
+subprocess.run(["git", "-C", str(MAXTEXT), "fetch", "origin", PIN], check=True)
+subprocess.run(["git", "-C", str(MAXTEXT), "checkout", "--detach", PIN], check=True)
+
+%pip install -e "./upstream/maxtext[tpu]" -e .
+%pip install --no-deps -r ./upstream/maxtext/src/dependencies/extra_deps/pre_train_github_deps.txt
+
+PYTHON = sys.executable
 def run(*args):
     subprocess.run([PYTHON, *map(str, args)], cwd=REPO, check=True)
-run("-c", "from llm5.launch import check_runtime; check_runtime()")
 ```
 
 ## 3. Paths and run settings
@@ -39,6 +44,11 @@ DATA_ROOT = REPO / "data/packed-512k"
 PLAN = REPO / "runs/plan-512k"
 MICROBATCHES = REPO / "runs/microbatches-512k.json"
 RUN_TUNING = True
+# Count devices for batch arithmetic; do not check their model.
+DEVICE_COUNT = int(subprocess.check_output([
+    PYTHON, "-c", "from llm5.launch import check_runtime; print(check_runtime())"
+], cwd=REPO, text=True).strip().splitlines()[-1])
+print("TPU device count:", DEVICE_COUNT)
 ```
 
 ## 4. Verify the bundled tokenizer, offline
@@ -61,7 +71,7 @@ print('BPE verified: V=65536; no dataset download')
 
 ```python
 PLAN_ARGS = ["--out", PLAN, "--data-root", DATA_ROOT, "--tokenizer", TOKENIZER,
-             "--output-root", OUTPUT_ROOT, "--run-prefix", RUN_PREFIX]
+             "--output-root", OUTPUT_ROOT, "--run-prefix", RUN_PREFIX, "--device-count", DEVICE_COUNT]
 run("-m", "llm5.plan", *PLAN_ARGS)
 import json
 manifest = json.loads((PLAN / "manifest.json").read_text())

@@ -17,16 +17,20 @@ def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def curriculum(config, microbatches=None):
+def curriculum(config, microbatches=None, device_count=1):
+    if device_count < 1:
+        raise ValueError("device_count must be positive")
     if sum(s["budget"] for s in config["stages"]) != config["target_tokens"]:
         raise ValueError("Stage budgets must sum to target_tokens")
     stages, end = [], 0
     for spec in config["stages"]:
         s = dict(spec)
         effective = s["microbatch"] * s["accumulation"]
-        s["microbatch"] = (microbatches or {}).get(s["name"], s["microbatch"])
-        if s["microbatch"] < 1 or effective % s["microbatch"]:
-            raise ValueError("microbatch must divide the stage effective sequence batch")
+        s["microbatch"] = (microbatches or {}).get(s["name"], max(s["microbatch"], device_count))
+        if s["microbatch"] < device_count or effective % s["microbatch"] or s["microbatch"] % device_count:
+            raise ValueError("Global microbatch must divide effective batch and be divisible by device_count")
+        s["device_count"] = device_count
+        s["per_device_microbatch"] = s["microbatch"] // device_count
         s["accumulation"] = effective // s["microbatch"]
         if not (0 <= s["math"] <= 1 and 0 <= s["code"] <= 1 - s["math"]):
             raise ValueError("Invalid domain mixture")
@@ -58,7 +62,7 @@ def parameter_count(model):
 def memory_components(model, stage):
     """Named tensor sizes only; excludes optimizer workspace, remat and XLA temporaries."""
     params = parameter_count(model)
-    tokens = stage["microbatch"] * stage["length"]
+    tokens = stage["per_device_microbatch"] * stage["length"]
     q = model["base_num_query_heads"] * model["head_dim"]
     kv = model["base_num_kv_heads"] * model["head_dim"]
     gib = 1024**3
@@ -71,9 +75,9 @@ def memory_components(model, stage):
     }
 
 
-def generate(out, data_root, tokenizer, output_root, run_prefix, microbatches=None):
+def generate(out, data_root, tokenizer, output_root, run_prefix, microbatches=None, device_count=1):
     raw = read_yaml(ROOT / "configs/curriculum.yml")
-    stages = curriculum(raw, microbatches)
+    stages = curriculum(raw, microbatches, device_count)
     model = read_yaml(ROOT / "configs/model.yml")
     out = Path(out).resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -87,7 +91,8 @@ def generate(out, data_root, tokenizer, output_root, run_prefix, microbatches=No
         cfg["base_config"] = "base.yml"  # resolved in installed MaxText configs
         cfg.update(
             run_name=f"{run_prefix}-{s['name']}", base_output_directory=output_root,
-            max_target_length=s["length"], per_device_batch_size=float(s["microbatch"]),
+            max_target_length=s["length"], per_device_batch_size=float(s["per_device_microbatch"]),
+            ici_data_parallelism=device_count,
             gradient_accumulation_steps=s["accumulation"], steps=s["end_step"],
             learning_rate_schedule_steps=total_steps,
             # Upstream casts fraction*total_steps to int; guard float roundoff.
@@ -106,7 +111,7 @@ def generate(out, data_root, tokenizer, output_root, run_prefix, microbatches=No
         path = out / f"{s['name']}.yml"
         path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
         s["config"] = str(path)
-    manifest = dict(maxtext_commit=MAXTEXT_COMMIT, stages=stages,
+    manifest = dict(maxtext_commit=MAXTEXT_COMMIT, stages=stages, device_count=device_count,
                     warmup_steps=raw["warmup_steps"], parameters=parameter_count(model),
                     approximate_loss_tokens=sum(s["loss_tokens"] for s in stages),
                     curriculum_sha256=digest(ROOT / "configs/curriculum.yml"),
@@ -124,6 +129,7 @@ def main():
     p.add_argument("--output-root", default="runs/checkpoints")
     p.add_argument("--run-prefix", default="llm5")
     p.add_argument("--microbatches", help="JSON file written by llm5.tune")
+    p.add_argument("--device-count", type=int, default=1)
     args = p.parse_args()
     values = vars(args)
     values["microbatches"] = json.loads(Path(args.microbatches).read_text()) if args.microbatches else None

@@ -18,9 +18,10 @@ def is_oom(log):
                                    "failed to allocate", "cannot allocate memory"))
 
 
-def candidates(effective_batch, length=1024, max_micro_tokens=131072):
+def candidates(effective_batch, length=1024, max_micro_tokens=131072, device_count=1):
     return [2**i for i in range(effective_batch.bit_length())
-            if effective_batch % 2**i == 0 and 2**i * length <= max_micro_tokens]
+            if effective_batch % 2**i == 0 and 2**i % device_count == 0
+            and 2**i * length <= max_micro_tokens*device_count]
 
 
 def steady_step_seconds(path, skip_steps):
@@ -44,18 +45,20 @@ def main():
     if args.skip_steps < 1 or args.steps < args.skip_steps + 3:
         p.error("Reserve at least three measured steps after warmup")
     os.environ.setdefault("JAX_PLATFORMS", "tpu")
-    check_runtime()
+    device_count = check_runtime()
     manifest = load_manifest(args.manifest)
+    if device_count != manifest["device_count"]:
+        raise RuntimeError(f"Regenerate plan with --device-count {device_count}")
     output, log_dir = Path(args.out), Path(args.log_dir).resolve()
     log_dir.mkdir(parents=True, exist_ok=True)
     chosen = {}
     report = {}
     for s in manifest["stages"]:
         results = []
-        for micro in candidates(s["effective_batch"], s["length"], args.max_micro_tokens):
+        for micro in candidates(s["effective_batch"], s["length"], args.max_micro_tokens, device_count):
             probe_id = f"{s['name']}-{micro}-{time.time_ns()}"
             metrics_path = log_dir / f"{probe_id}.jsonl"
-            overrides = [f"per_device_batch_size={float(micro)}",
+            overrides = [f"per_device_batch_size={float(micro/device_count)}",
                          f"gradient_accumulation_steps={s['effective_batch'] // micro}",
                          f"steps={args.steps}", "dataset_type=synthetic", "eval_interval=-1",
                          "load_full_state_path=", "enable_checkpointing=false",

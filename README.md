@@ -36,7 +36,7 @@ K 按 1024 解讀；10B token budget 按十進位。GQA head 數、tied embeddin
 
 單顆 TPU 上 `per_device_batch_size` 是 microbatch；GA 為 `gradient_accumulation_steps`。每次 optimizer update 的容量為 **524,288 tokens（512K）**，總計約 **10.0B loss tokens／19,080 updates**。有效 sequence batch 依序為 512、256、128、64、32、16。以完整 batch 取整，不做精確 token 尾批截斷。Native Grain shift 會遮罩每列最後一個 target，預算估算已扣掉此位置。
 
-完整 notebook：[M2_TPU_v6e_512K.ipynb](notebooks/M2_TPU_v6e_512K.ipynb)；各 code block 的文字版：[BLOCKS.md](notebooks/BLOCKS.md)。使用既有 Linux TPU v6e-1 VM 的 Jupyter 執行；不假設 Colab 一定提供 v6e-1。已完成的 tokenizer 隨專案放在 `models/tokenizer`，notebook 直接離線驗證及使用，不重新訓練 tokenizer。
+完整 notebook：[M2_TPU_v6e_512K.ipynb](notebooks/M2_TPU_v6e_512K.ipynb)；各 code block 的文字版：[BLOCKS.md](notebooks/BLOCKS.md)。直接在 Colab TPU runtime 使用 `%pip` 安裝，不建立 venv、不限制或檢查 TPU 型號。已完成的 tokenizer 隨專案放在 `models/tokenizer`，notebook 直接離線驗證及使用，不重新訓練 tokenizer。只讀取裝置數來換算 global microbatch、每裝置 microbatch 和 GA，確保有效 batch 仍為 512K tokens。
 
 每階段使用獨立 `run_name`。`steps` 是累計結束步數；後一階段從前一階段的 **full state checkpoint** 載入，保留 weights、Muon/AdamW momentum、optimizer counters 和全域 step。新的長度建立新的資料 iterator；同一階段中斷續訓則由 MaxText 自動載入該階段 checkpoint 和 Grain iterator。六階段共用完整 LR schedule，不重新 warmup、不在最後衰減。
 
@@ -45,21 +45,20 @@ K 按 1024 解讀；10B token budget 按十進位。GQA head 數、tied embeddin
 Python 3.12+；準備資料與 tokenizer 不需要 TPU。
 
 ```powershell
-.\.tools\uv\uv.exe pip install --python .venv\Scripts\python.exe -e '.[test]'
-.\.venv\Scripts\python.exe -m pytest -q
-.\.venv\Scripts\python.exe -m llm5.plan
-.\.venv\Scripts\python.exe -m llm5.launch
+python -m pip install -e '.[test]'
+python -m pytest -q
+python -m llm5.plan
+python -m llm5.launch
 ```
 
 最後一個指令預設只列印命令。`runs/plan` 是本機產生的預覽，搬到 Linux TPU VM 後要重新產生，不能沿用 Windows 絕對路徑。
 
 ## TPU VM 上的流程
 
-使用已存在的 **v6e-1 Linux VM**，不需要這個專案來 provision TPU。MaxText 原始碼固定在 commit `ce608b918c4fdfbfdb62f5a7976d2e15e4fdd720`，避免框架介面漂移。先安裝 [uv](https://docs.astral.sh/uv/getting-started/installation/)，再執行：
+Colab 使用上方 notebook 的 `%pip` blocks。一般 Linux TPU 環境也可以用以下腳本，直接安裝至目前 Python，不建立 venv。MaxText 原始碼固定在 commit `ce608b918c4fdfbfdb62f5a7976d2e15e4fdd720`：
 
 ```bash
 bash scripts/setup_tpu.sh
-source .venv-tpu/bin/activate
 
 # 使用 Hugging Face datasets streaming，只讀 content，小批次取樣。
 # 字元上限控制 BPE 文字樣本量，不是網路流量上限。
