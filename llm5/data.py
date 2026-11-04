@@ -3,6 +3,7 @@ import argparse
 from collections import deque
 import hashlib
 import json
+import os
 from pathlib import Path
 import random
 
@@ -10,6 +11,7 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 from tokenizers import Tokenizer
+from tqdm.auto import tqdm
 
 from llm5.plan import ROOT, digest, read_json, curriculum
 
@@ -37,7 +39,7 @@ def documents(domain, partition, seed=42, local_root=None, subset_index=None):
     source = read_json(ROOT / "configs/sources.json")[domain]
     active = []
     subsets = source["subsets"] if subset_index is None else [source["subsets"][subset_index]]
-    for sub in subsets:
+    for sub in tqdm(subsets, desc=f"{domain}/{partition} sources", unit="source", leave=False):
         ds = load_dataset(source["repo"], sub["config"], split=sub["split"],
                           revision=source["revision"], streaming=True,
                           columns=[source["column"]], batch_size=16,
@@ -61,9 +63,11 @@ def documents(domain, partition, seed=42, local_root=None, subset_index=None):
 
 class TokenStream:
     """Continuous document stream, separated by EOS, with bounded token buffers."""
-    def __init__(self, docs, tokenizer):
+    def __init__(self, docs, tokenizer, batch_size=256):
         self.docs, self.tokenizer, self.buffer = iter(docs), tokenizer, deque()
         self.eos = tokenizer.token_to_id("<|endoftext|>")
+        self.batch_size = batch_size
+        self.documents_seen = 0
         if self.eos is None:
             raise ValueError("Tokenizer has no EOS")
 
@@ -71,13 +75,14 @@ class TokenStream:
         while len(self.buffer) < n:
             # Batch BPE encoding runs in the tokenizers Rust thread pool.
             batch = []
-            for _ in range(32):
+            for _ in range(self.batch_size):
                 try:
                     batch.append(next(self.docs))
                 except StopIteration:
                     break
             if not batch:
                 raise RuntimeError("Source exhausted; add data rather than silently repeating documents")
+            self.documents_seen += len(batch)
             for encoded in self.tokenizer.encode_batch(batch, add_special_tokens=False):
                 self.buffer.extend(t for t in encoded.ids if t != 0)
                 self.buffer.append(self.eos)
@@ -102,20 +107,37 @@ def write_shards(directory, prefix, count, length, streams, weights, seed):
     schema = pa.schema([("text", pa.list_(pa.int32()))])
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
-    for start in range(0, count, rows_per_shard):
-        path = directory / f"{prefix}-{start // rows_per_shard:05d}.parquet"
-        temporary = path.with_suffix(".parquet.partial")
-        with pq.ParquetWriter(temporary, schema, compression="zstd") as writer:
-            for batch_start in range(start, min(start + rows_per_shard, count), 64):
-                rows = [streams[DOMAINS[int(i)]].take(length)
-                        for i in order[batch_start:min(batch_start + 64, start + rows_per_shard, count)]]
-                writer.write_table(pa.Table.from_pydict({"text": rows}, schema=schema))
-        temporary.replace(path)
-        print(f"Wrote {path}", flush=True)
+    shard_count = (count + rows_per_shard - 1) // rows_per_shard
+    initial_docs = sum(s.documents_seen for s in streams.values())
+    with tqdm(total=count*length, desc=f"{directory.name}/{prefix}", unit="tok",
+              unit_scale=True, mininterval=1.0) as progress:
+        for start in range(0, count, rows_per_shard):
+            index = start // rows_per_shard
+            path = directory / f"{prefix}-{index:05d}.parquet"
+            temporary = path.with_suffix(".parquet.partial")
+            with pq.ParquetWriter(temporary, schema, compression="zstd") as writer:
+                for batch_start in range(start, min(start + rows_per_shard, count), 64):
+                    rows = [streams[DOMAINS[int(i)]].take(length)
+                            for i in order[batch_start:min(batch_start + 64, start + rows_per_shard, count)]]
+                    writer.write_table(pa.Table.from_pydict({"text": rows}, schema=schema))
+                    progress.set_postfix(shards=f"{index}/{shard_count}",
+                                         docs=sum(s.documents_seen for s in streams.values())-initial_docs,
+                                         refresh=False)
+                    progress.update(len(rows)*length)
+            temporary.replace(path)
+            progress.set_postfix(shards=f"{index+1}/{shard_count}",
+                                 docs=sum(s.documents_seen for s in streams.values())-initial_docs,
+                                 refresh=False)
     return dict(zip(DOMAINS, quotas))
 
 
-def prepare(out, tokenizer, eval_sequences=128, local_root=None, limit_stages=None):
+def prepare(out, tokenizer, eval_sequences=128, local_root=None, limit_stages=None,
+            tokenizer_batch_size=256, tokenizer_threads=None):
+    threads = tokenizer_threads if tokenizer_threads is not None else min(8, os.cpu_count() or 1)
+    if tokenizer_batch_size < 1 or threads < 1:
+        raise ValueError("Tokenizer batch size and thread count must be positive")
+    os.environ["TOKENIZERS_PARALLELISM"] = "true"
+    os.environ.setdefault("RAYON_NUM_THREADS", str(threads))
     out = Path(out)
     raw = read_json(ROOT / "configs/curriculum.json")
     stages = curriculum(raw)
@@ -123,9 +145,9 @@ def prepare(out, tokenizer, eval_sequences=128, local_root=None, limit_stages=No
     if tok.get_vocab_size() != 65536 or tok.token_to_id("<|pad|>") != 0:
         raise ValueError("Production preparation requires V=65536 and PAD=0")
     token_hash = digest(Path(tokenizer) / "tokenizer.json")
-    streams = {part: {d: TokenStream(documents(d, part, raw["seed"], local_root), tok)
+    streams = {part: {d: TokenStream(documents(d, part, raw["seed"], local_root), tok, tokenizer_batch_size)
                       for d in DOMAINS} for part in ("train", "eval")}
-    for i, s in enumerate(stages):
+    for i, s in enumerate(tqdm(stages, desc="Prepare data", unit="stage")):
         if limit_stages and i >= limit_stages:
             break
         directory = out / s["name"]
@@ -150,6 +172,8 @@ def main():
     p.add_argument("--eval-sequences", type=int, default=128)
     p.add_argument("--local-root")
     p.add_argument("--limit-stages", type=int)
+    p.add_argument("--tokenizer-batch-size", type=int, default=256)
+    p.add_argument("--tokenizer-threads", type=int)
     prepare(**vars(p.parse_args()))
 
 

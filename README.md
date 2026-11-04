@@ -32,6 +32,16 @@ os.environ["JAX_COMPILATION_CACHE_DIR"] = "/content/jax-cache"
 
 程式沿用環境變數、不印出 token。直接讀取 `configs/curriculum.json`，不修改 microbatch 或 GA，不執行任何測速。依目前設定：microbatch 為 128／64／32／16／8／4，GA 都為 4，每次更新容量 512K tokens。microbatch 是全域 sequence 數；每裝置 batch 依裝置數換算，但不自動改寫 curriculum。
 
+資料準備顯示來源連線、階段、寫入 token 數、已處理文件數及 shard 進度；訓練顯示該長度階段的 step、loss、速度與預估剩餘時間，續訓會跳到已完成的 step。下載／編譯期間尚未完成的 token 或 step 不會提前計入。
+
+Tokenizer 使用同程序 Rust 多執行緒的 `encode_batch`，預設每批 256 篇文件、最多 8 個 threads，不建立 Python worker 程序。可調整：
+
+```python
+%run -m llm5.start --tokenizer-batch-size 256 --tokenizer-threads 8
+```
+
+若已自行設定 `RAYON_NUM_THREADS`，會沿用該值。Rust thread pool 已啟動後，修改 thread 數需要在下一次 kernel 啟動前設定環境變數。
+
 缺少資料時先從 UltraData L3 準備約 10B tokens，int32 原始容量約 40GB，另需 cache 與 checkpoint 空間；資料已完成則直接驗證並訓練。使用 HF datasets 串流、不 shuffle，已訓練的 tokenizer 在 `models/tokenizer`。下載量由 Parquet 區塊決定，不等於文字樣本大小。
 
 Checkpoint 預設在 `/content/M2/runs/checkpoints`；需保存至 GCS 時：

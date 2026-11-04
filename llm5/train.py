@@ -3,6 +3,31 @@ from functools import wraps
 from pathlib import Path
 import warnings
 import math
+import json
+from tqdm.auto import tqdm
+
+_TRAINING_PROGRESS = None
+
+
+def update_training_progress(metrics, step, metric_type):
+    state = _TRAINING_PROGRESS
+    if state is None or metric_type != "train":
+        return
+    progress = state["bar"]
+    if not state["initialized"]:
+        resumed = min(progress.total, max(0, int(step)-state["start_step"]))
+        progress.reset()
+        progress.n = progress.initial = progress.last_print_n = resumed
+        state["initialized"] = True
+    scalars = metrics.get("scalar", {})
+    values = {}
+    if "learning/loss" in scalars:
+        values["loss"] = f"{float(scalars['learning/loss']):.4f}"
+    if "learning/current_learning_rate" in scalars:
+        values["lr"] = f"{float(scalars['learning/current_learning_rate']):.2e}"
+    progress.set_postfix(values, refresh=False)
+    completed = min(progress.total, max(0, int(step)+1-state["start_step"]))
+    progress.update(max(0, completed-progress.n))
 
 PERPLEXITY_SOURCES = (
     ("learning/lm_loss", "learning/perplexity", "learning/log_perplexity"),
@@ -64,7 +89,7 @@ def install_metric_diagnostics(module=None):
     if module is None:
         from maxtext.common import metric_logger as module
     original = module.MetricLogger.write_metrics
-    if getattr(original, "_llm5_finite_check_version", 0) == 2:
+    if getattr(original, "_llm5_finite_check_version", 0) == 3:
         return
     if getattr(original, "_llm5_finite_check", False):
         original = original.__wrapped__
@@ -82,10 +107,12 @@ def install_metric_diagnostics(module=None):
             if critical.intersection(bad):
                 raise FloatingPointError(message)
             warnings.warn(message, RuntimeWarning, stacklevel=2)
-        return original(self, metrics, step, metric_type)
+        result = original(self, metrics, step, metric_type)
+        update_training_progress(metrics, step, metric_type)
+        return result
 
     write_metrics._llm5_finite_check = True
-    write_metrics._llm5_finite_check_version = 2
+    write_metrics._llm5_finite_check_version = 3
     module.MetricLogger.write_metrics = write_metrics
     for method_name, use_float32 in (("write_metrics_to_tensorboard", True), ("write_metrics_locally", False)):
         native = getattr(module.MetricLogger, method_name, None)
@@ -135,16 +162,24 @@ def main():
     app.run(train.main)
 
 
-def run_training_config(config_path):
+def run_training_config(config_path, start_step=0):
     """Run MaxText directly in the caller's process; preserve native exceptions."""
-    install_json_config_support()
-    install_fused_qkv_muon_support()
-    install_metric_diagnostics()
-    from absl import flags
-    from maxtext.trainers.pre_train import train
-    if not flags.FLAGS.is_parsed():
-        flags.FLAGS(["llm5"])
-    return train.main(["llm5.train", str(config_path)])
+    global _TRAINING_PROGRESS
+    config = json.loads(Path(config_path).read_text(encoding="utf-8"))
+    previous = _TRAINING_PROGRESS
+    with tqdm(total=config["steps"]-start_step, desc=config["run_name"], unit="step", mininterval=1.0) as progress:
+        _TRAINING_PROGRESS = {"bar": progress, "start_step": start_step, "initialized": False}
+        try:
+            install_json_config_support()
+            install_fused_qkv_muon_support()
+            install_metric_diagnostics()
+            from absl import flags
+            from maxtext.trainers.pre_train import train
+            if not flags.FLAGS.is_parsed():
+                flags.FLAGS(["llm5"])
+            return train.main(["llm5.train", str(config_path)])
+        finally:
+            _TRAINING_PROGRESS = previous
 
 
 if __name__ == "__main__":
