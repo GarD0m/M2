@@ -33,7 +33,7 @@ def test_curriculum_preserves_batch_and_step_continuity(tmp_path):
         else:
             assert cfg["load_full_state_path"] == ""
     assert m["parameters"] == 385899776
-    assert load_manifest(tmp_path / "plan/manifest.json")["maxtext_commit"] == m["maxtext_commit"]
+    assert load_manifest(tmp_path / "plan/manifest.json")["maxtext_version"] == m["maxtext_version"]
 
 
 def test_rejects_invalid_curriculum():

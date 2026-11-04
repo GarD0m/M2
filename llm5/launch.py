@@ -9,7 +9,7 @@ import subprocess
 import sys
 
 import pyarrow.parquet as pq
-from llm5.plan import MAXTEXT_COMMIT, ROOT, digest, read_yaml
+from llm5.plan import MAXTEXT_VERSION, ROOT, digest, read_yaml
 
 
 def load_manifest(path):
@@ -18,7 +18,7 @@ def load_manifest(path):
                       ("sources_sha256", "sources.yml"), ("model_sha256", "model.yml")]:
         if manifest[key] != digest(ROOT / "configs" / file):
             raise ValueError(f"{file} changed; regenerate plan and, where relevant, packed data")
-    if manifest["maxtext_commit"] != MAXTEXT_COMMIT:
+    if manifest["maxtext_version"] != MAXTEXT_VERSION:
         raise ValueError("Unexpected MaxText revision")
     return manifest
 
@@ -56,16 +56,10 @@ def check_data(stage):
 
 
 def check_runtime():
-    import maxtext
+    from importlib.metadata import version
     import jax
-    package = Path(maxtext.__file__).resolve()
-    checkout = next((p for p in package.parents if (p / ".git").exists()), None)
-    if checkout is None:
-        raise RuntimeError("Install the pinned editable MaxText checkout using scripts/setup_tpu.sh")
-    commit = subprocess.check_output(["git", "-C", str(checkout), "rev-parse", "HEAD"], text=True).strip()
-    dirty = subprocess.check_output(["git", "-C", str(checkout), "status", "--porcelain", "--untracked-files=no"], text=True)
-    if commit != MAXTEXT_COMMIT or dirty.strip():
-        raise RuntimeError("MaxText checkout differs from the tested source revision")
+    if version("maxtext") != MAXTEXT_VERSION:
+        raise RuntimeError(f"Install maxtext=={MAXTEXT_VERSION} using requirements.txt")
     devices = jax.devices()
     if not devices or any(d.platform != "tpu" for d in devices):
         raise RuntimeError("Select a TPU runtime in Colab")

@@ -55,7 +55,7 @@ python -m llm5.launch
 
 ## TPU VM 上的流程
 
-Colab 使用上方 notebook 的 `%pip` blocks。一般 Linux TPU 環境也可以用以下腳本，直接安裝至目前 Python，不建立 venv。MaxText 原始碼固定在 commit `ce608b918c4fdfbfdb62f5a7976d2e15e4fdd720`：
+Colab 使用上方 notebook 的 `%pip install -r requirements.txt`。使用 PyPI 版本 `maxtext==0.2.5`，不 clone MaxText、不固定 commit。一般 Linux TPU 環境也可以用以下腳本，直接安裝至目前 Python，不建立 venv：
 
 ```bash
 bash scripts/setup_tpu.sh
@@ -107,4 +107,12 @@ python -m llm5.launch --execute
 
 每階段資料完成後寫入 metadata，記錄 tokenizer／sources／curriculum hashes 與 sequence 數。啟動時檢查 hash、Parquet rows 和抽樣 token 範圍，防止換 tokenizer 後誤用舊資料。預處理輸出必須是新目錄；中斷的未完成資料請改用新目錄重建，沒有宣稱具備 preprocessing resume。
 
-官方框架參考：[MaxText 原始碼](https://github.com/AI-Hypercomputer/maxtext/tree/ce608b918c4fdfbfdb62f5a7976d2e15e4fdd720)、[安裝流程](https://github.com/AI-Hypercomputer/maxtext/blob/ce608b918c4fdfbfdb62f5a7976d2e15e4fdd720/docs/install_maxtext.md)。
+`requirements.txt` 是專案維護的 Colab TPU 安裝清單，參照使用者提供的 `pip-freeze.tpu.txt`，保留 JAX/JAXlib 0.11.2、libtpu 0.0.50 等核心版本，並使用符合 MaxText NNX 需求的 Flax。原始 freeze 只作參考，不直接重裝 Colab 本機套件路徑。MaxText 不使用 `[tpu]` extra，因為其 0.2.5 套件宣告包含 SymPy/mpmath 衝突；本專案明列 runtime 依賴，採用相容的 SymPy 1.14.0／mpmath 1.3.0。已完成 Linux Python 3.13 的依賴解析，尚未在 Colab TPU 執行完整安裝及訓練。
+
+完成 notebook blocks 1–5 後，不用先準備訓練資料即可執行 synthetic batch/GA 測速：
+
+```bash
+python -m llm5.tune --manifest runs/plan-512k/manifest.json --out runs/microbatches-512k.json --log-dir runs/probes-512k --steps 12 --skip-steps 4 --max-micro-tokens 131072
+```
+
+官方框架參考：[MaxText 0.2.5](https://pypi.org/project/maxtext/0.2.5/)、[安裝流程](https://maxtext.readthedocs.io/en/latest/install_maxtext.html)。

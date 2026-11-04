@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import yaml
 
-MAXTEXT_COMMIT = "ce608b918c4fdfbfdb62f5a7976d2e15e4fdd720"
+MAXTEXT_VERSION = "0.2.5"
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -111,7 +111,7 @@ def generate(out, data_root, tokenizer, output_root, run_prefix, microbatches=No
         path = out / f"{s['name']}.yml"
         path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
         s["config"] = str(path)
-    manifest = dict(maxtext_commit=MAXTEXT_COMMIT, stages=stages, device_count=device_count,
+    manifest = dict(maxtext_version=MAXTEXT_VERSION, stages=stages, device_count=device_count,
                     warmup_steps=raw["warmup_steps"], parameters=parameter_count(model),
                     approximate_loss_tokens=sum(s["loss_tokens"] for s in stages),
                     curriculum_sha256=digest(ROOT / "configs/curriculum.yml"),

@@ -14,19 +14,11 @@ os.chdir(REPO)
 print(REPO)
 ```
 
-## 2. Install directly into Colab with pip
+## 2. Install project requirements directly in Colab
 
 ```python
-# Select a TPU runtime. No virtual environment or TPU model restriction.
-MAXTEXT = REPO / "upstream/maxtext"
-PIN = "ce608b918c4fdfbfdb62f5a7976d2e15e4fdd720"
-if not (MAXTEXT / ".git").exists():
-    subprocess.run(["git", "clone", "https://github.com/AI-Hypercomputer/maxtext.git", str(MAXTEXT)], check=True)
-subprocess.run(["git", "-C", str(MAXTEXT), "fetch", "origin", PIN], check=True)
-subprocess.run(["git", "-C", str(MAXTEXT), "checkout", "--detach", PIN], check=True)
-
-%pip install -e "./upstream/maxtext[tpu]" -e .
-%pip install --no-deps -r ./upstream/maxtext/src/dependencies/extra_deps/pre_train_github_deps.txt
+# No MaxText clone, fixed commit, virtual environment or TPU model check.
+%pip install -r requirements.txt
 
 PYTHON = sys.executable
 def run(*args):
