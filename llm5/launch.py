@@ -75,12 +75,12 @@ def command(config, overrides=()):
     return [sys.executable, "-m", "llm5.train", str(config), *overrides]
 
 
-def main():
+def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--manifest", default="runs/plan/manifest.json")
     p.add_argument("--check-data", action="store_true")
     p.add_argument("--execute", action="store_true", help="Start training on the current TPU VM")
-    args = p.parse_args()
+    args = p.parse_args(argv)
     manifest = load_manifest(args.manifest)
     if args.execute:
         os.environ.setdefault("JAX_PLATFORMS", "tpu")

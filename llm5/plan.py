@@ -16,7 +16,7 @@ def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def curriculum(config, microbatches=None, device_count=1):
+def curriculum(config, device_count=1):
     if device_count < 1:
         raise ValueError("device_count must be positive")
     if sum(s["budget"] for s in config["stages"]) != config["target_tokens"]:
@@ -25,12 +25,10 @@ def curriculum(config, microbatches=None, device_count=1):
     for spec in config["stages"]:
         s = dict(spec)
         effective = s["microbatch"] * s["accumulation"]
-        s["microbatch"] = (microbatches or {}).get(s["name"], max(s["microbatch"], device_count))
         if s["microbatch"] < device_count or effective % s["microbatch"] or s["microbatch"] % device_count:
             raise ValueError("Global microbatch must divide effective batch and be divisible by device_count")
         s["device_count"] = device_count
         s["per_device_microbatch"] = s["microbatch"] // device_count
-        s["accumulation"] = effective // s["microbatch"]
         if not (0 <= s["math"] <= 1 and 0 <= s["code"] <= 1 - s["math"]):
             raise ValueError("Invalid domain mixture")
         s["general"] = 1 - s["math"] - s["code"]
@@ -74,9 +72,9 @@ def memory_components(model, stage):
     }
 
 
-def generate(out, data_root, tokenizer, output_root, run_prefix, microbatches=None, device_count=1):
+def generate(out, data_root, tokenizer, output_root, run_prefix, device_count=1):
     raw = read_json(ROOT / "configs/curriculum.json")
-    stages = curriculum(raw, microbatches, device_count)
+    stages = curriculum(raw, device_count)
     model = read_json(ROOT / "configs/model.json")
     out = Path(out).resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -128,11 +126,9 @@ def main():
     p.add_argument("--tokenizer", default="artifacts/tokenizer")
     p.add_argument("--output-root", default="runs/checkpoints")
     p.add_argument("--run-prefix", default="llm5")
-    p.add_argument("--microbatches", help="JSON file written by llm5.tune")
     p.add_argument("--device-count", type=int, default=1)
     args = p.parse_args()
     values = vars(args)
-    values["microbatches"] = json.loads(Path(args.microbatches).read_text()) if args.microbatches else None
     m = generate(**values)
     print(f"Parameters: {m['parameters']:,}; loss tokens: ~{m['approximate_loss_tokens']:,}")
     for s in m["stages"]:

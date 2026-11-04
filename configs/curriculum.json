@@ -7,8 +7,8 @@
       "name": "1k",
       "length": 1024,
       "budget": 2000000000,
-      "microbatch": 32,
-      "accumulation": 16,
+      "microbatch": 128,
+      "accumulation": 4,
       "math": 0.05,
       "code": 0.15
     },
@@ -16,8 +16,8 @@
       "name": "2k",
       "length": 2048,
       "budget": 2000000000,
-      "microbatch": 16,
-      "accumulation": 16,
+      "microbatch": 64,
+      "accumulation": 4,
       "math": 0.07,
       "code": 0.17
     },
@@ -25,8 +25,8 @@
       "name": "4k",
       "length": 4096,
       "budget": 2000000000,
-      "microbatch": 8,
-      "accumulation": 16,
+      "microbatch": 32,
+      "accumulation": 4,
       "math": 0.09,
       "code": 0.19
     },
@@ -34,8 +34,8 @@
       "name": "8k",
       "length": 8192,
       "budget": 2000000000,
-      "microbatch": 4,
-      "accumulation": 16,
+      "microbatch": 16,
+      "accumulation": 4,
       "math": 0.11,
       "code": 0.21
     },
@@ -43,8 +43,8 @@
       "name": "16k",
       "length": 16384,
       "budget": 1000000000,
-      "microbatch": 2,
-      "accumulation": 16,
+      "microbatch": 8,
+      "accumulation": 4,
       "math": 0.13,
       "code": 0.23
     },
@@ -52,8 +52,8 @@
       "name": "32k",
       "length": 32768,
       "budget": 1000000000,
-      "microbatch": 1,
-      "accumulation": 16,
+      "microbatch": 4,
+      "accumulation": 4,
       "math": 0.15,
       "code": 0.25
     }
