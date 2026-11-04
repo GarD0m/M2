@@ -44,10 +44,16 @@ Tokenizer 使用同程序 Rust 多執行緒的 `encode_batch`，預設每批 256
 
 缺少資料時先從 UltraData L3 準備約 10B tokens，int32 原始容量約 40GB，另需 cache 與 checkpoint 空間；資料已完成則直接驗證並訓練。使用 HF datasets 串流、不 shuffle，已訓練的 tokenizer 在 `models/tokenizer`。下載量由 Parquet 區塊決定，不等於文字樣本大小。
 
-Checkpoint 預設在 `/content/M2/runs/checkpoints`；需保存至 GCS 時：
+Checkpoint 每 **100 個 optimizer step** 儲存一次，階段結束時也會儲存。完整 Orbax checkpoint（模型、optimizer state、Grain iterator）由同一程序內的背景執行緒上傳至 [tim123xyz/Test](https://huggingface.co/tim123xyz/Test)，沿用 `HF_TOKEN`，需要該模型庫的寫入權限。全程不啟動另一個訓練程序。
+
+本機預設在 `/content/M2/runs/checkpoints`，每階段保留最近 3 份；待上傳資料使用快照保護，不會被本機保留策略提前移除。只有完整上傳成功後才更新 Hub 的 `latest.json`。階段結束和正常離開程式前會等候剩餘上傳完成；背景錯誤會在下一步直接拋出。Hub 保留每份上傳的 checkpoint，不自動刪除遠端版本。
+
+下次執行相同命令，會自動讀取 Hub 最新 checkpoint，驗證 model／curriculum／tokenizer 是否匹配，下載並恢復完整訓練狀態；若本機有更新的 checkpoint 則優先使用本機。已完成階段不會重新訓練。若新 Colab runtime 沒有原訓練資料，仍需重新準備相同資料，之後才按保存的 iterator 位置續訓。這些是 MaxText 訓練 checkpoint，並非直接供 `AutoModel.from_pretrained` 使用的 Transformers 權重。
+
+預設即上傳並自動續訓；也可以明確指定：
 
 ```python
-%run -m llm5.start --output-root gs://YOUR_BUCKET/m2
+%run -m llm5.start --hub-repo tim123xyz/Test
 ```
 
 所有訓練在目前 kernel 執行，原始錯誤直接拋出。JSON 設定在 `configs`；MaxText 使用 PyPI 版本 0.2.5，不 clone、不固定 commit、不建立 venv、不限制 TPU 型號。

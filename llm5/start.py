@@ -3,6 +3,7 @@ import argparse
 from pathlib import Path
 from llm5 import data, launch
 from llm5.plan import generate
+from llm5.hub import CheckpointHub
 
 
 def main(argv=None):
@@ -14,6 +15,7 @@ def main(argv=None):
     p.add_argument("--run-prefix", default="m2-bf16-512k-v1")
     p.add_argument("--tokenizer-batch-size", type=int, default=256)
     p.add_argument("--tokenizer-threads", type=int)
+    p.add_argument("--hub-repo", default="tim123xyz/Test")
     args = p.parse_args(argv)
     device_count = launch.check_runtime()
     manifest = generate(args.plan_dir, args.data_root, args.tokenizer,
@@ -21,12 +23,15 @@ def main(argv=None):
     for stage in manifest["stages"]:
         print(f"{stage['name']}: global microbatch={stage['microbatch']}, "
               f"GA={stage['accumulation']}, steps={stage['num_steps']}", flush=True)
-    if not all((Path(args.data_root) / s["name"] / "metadata.json").exists()
-               for s in manifest["stages"]):
-        print("Preparing actual training data from UltraData L3", flush=True)
-        data.prepare(args.data_root, args.tokenizer,
-                     tokenizer_batch_size=args.tokenizer_batch_size, tokenizer_threads=args.tokenizer_threads)
-    launch.main(["--manifest", str(Path(args.plan_dir) / "manifest.json"), "--execute"])
+    with CheckpointHub(args.hub_repo, manifest) as hub:
+        resume = hub.restore_latest()
+        if not all((Path(args.data_root) / s["name"] / "metadata.json").exists()
+                   for s in manifest["stages"]):
+            print("Preparing actual training data from UltraData L3", flush=True)
+            data.prepare(args.data_root, args.tokenizer,
+                         tokenizer_batch_size=args.tokenizer_batch_size, tokenizer_threads=args.tokenizer_threads)
+        launch.main(["--manifest", str(Path(args.plan_dir) / "manifest.json"), "--execute"],
+                    checkpoint_hub=hub, resume=resume)
 
 
 if __name__ == "__main__":

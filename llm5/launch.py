@@ -75,18 +75,26 @@ def command(config, overrides=()):
     return [sys.executable, "-m", "llm5.train", str(config), *overrides]
 
 
-def main(argv=None):
+def main(argv=None, checkpoint_hub=None, resume=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--manifest", default="runs/plan/manifest.json")
     p.add_argument("--check-data", action="store_true")
     p.add_argument("--execute", action="store_true", help="Start training on the current TPU VM")
+    p.add_argument("--hub-repo", default="tim123xyz/Test")
     args = p.parse_args(argv)
     manifest = load_manifest(args.manifest)
+    if args.execute and checkpoint_hub is None:
+        from llm5.hub import CheckpointHub
+        with CheckpointHub(args.hub_repo, manifest) as hub:
+            return main(argv, checkpoint_hub=hub, resume=hub.restore_latest())
     if args.execute:
         os.environ.setdefault("JAX_PLATFORMS", "tpu")
         # MaxText initializes distributed JAX before its first device query.
         # Subsequent stages reuse that runtime in this process.
-    for s in manifest["stages"]:
+    for index, s in enumerate(manifest["stages"]):
+        if resume is not None and index < resume["index"]:
+            print(f"{s['name']} already completed before restored checkpoint", flush=True)
+            continue
         if args.check_data or args.execute:
             check_data(s)
         cfg = read_json(s["config"])
@@ -100,7 +108,8 @@ def main(argv=None):
             continue
         if cfg["load_full_state_path"] and not epath.Path(cfg["load_full_state_path"]).exists():
             raise FileNotFoundError(f"Previous stage full checkpoint missing: {cfg['load_full_state_path']}")
-        run_training_config(s["config"], start_step=s["start_step"])
+        run_training_config(s["config"], start_step=s["start_step"], checkpoint_hub=checkpoint_hub)
+        checkpoint_hub.wait()
         if not epath.Path(checkpoint_items(cfg, s["end_step"])).exists():
             raise RuntimeError("Training exited without the required final full-state checkpoint")
 

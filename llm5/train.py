@@ -1,6 +1,7 @@
 """Native MaxText entry point with fused-QKV Muon dimension support."""
 from functools import wraps
 from pathlib import Path
+from contextlib import nullcontext
 import warnings
 import math
 import json
@@ -162,7 +163,7 @@ def main():
     app.run(train.main)
 
 
-def run_training_config(config_path, start_step=0):
+def run_training_config(config_path, start_step=0, checkpoint_hub=None):
     """Run MaxText directly in the caller's process; preserve native exceptions."""
     global _TRAINING_PROGRESS
     config = json.loads(Path(config_path).read_text(encoding="utf-8"))
@@ -177,7 +178,8 @@ def run_training_config(config_path, start_step=0):
             from maxtext.trainers.pre_train import train
             if not flags.FLAGS.is_parsed():
                 flags.FLAGS(["llm5"])
-            return train.main(["llm5.train", str(config_path)])
+            with checkpoint_hub.capture() if checkpoint_hub is not None else nullcontext():
+                return train.main(["llm5.train", str(config_path)])
         finally:
             _TRAINING_PROGRESS = previous
 
