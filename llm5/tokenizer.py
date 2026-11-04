@@ -8,7 +8,7 @@ from math import ceil
 from tokenizers import Tokenizer, Regex, models, trainers, pre_tokenizers, decoders
 from transformers import PreTrainedTokenizerFast
 from llm5.data import documents, DOMAINS
-from llm5.plan import ROOT, digest, read_yaml
+from llm5.plan import ROOT, digest, read_json
 
 SPECIAL = ["<|pad|>", "<|endoftext|>", "<|im_start|>", "<|im_end|>"]
 PATTERN = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+"
@@ -38,7 +38,7 @@ def build_bpe(texts, out, vocab_size=65536, min_frequency=2):
 
 
 def sample_texts(max_documents, max_characters, local_root=None):
-    sources = read_yaml(ROOT / "configs/sources.yml")
+    sources = read_json(ROOT / "configs/sources.json")
     weights = dict(zip(DOMAINS, [0.7, 0.1, 0.2]))
     chars = count = 0
     for domain in DOMAINS:
@@ -109,7 +109,7 @@ def main():
     tok = build_bpe(sample_file_texts(sample), out)
     for text in ["繁體中文與 English\n", "def f(x):\n    return x**2\n", "1234567890 + π = 😀"]:
         assert tok.decode(tok.encode(text, add_special_tokens=False)) == text
-    metadata = dict(vocab_size=len(tok), sources_sha256=digest(ROOT / "configs/sources.yml"),
+    metadata = dict(vocab_size=len(tok), sources_sha256=digest(ROOT / "configs/sources.json"),
                     tokenizer_sha256=digest(out / "tokenizer.json"),
                     max_documents=args.max_documents, max_characters=args.max_characters,
                     seed=42, sample_domain_weights=[0.7, 0.1, 0.2], algorithm="ByteLevel BPE",

@@ -3,15 +3,13 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
-import yaml
 
 MAXTEXT_VERSION = "0.2.5"
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def read_yaml(path):
-    text = Path(path).read_text(encoding="utf-8")
-    return json.loads(text) if Path(path).suffix == ".json" else yaml.safe_load(text)
+def read_json(path):
+    return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
 def digest(path):
@@ -77,9 +75,9 @@ def memory_components(model, stage):
 
 
 def generate(out, data_root, tokenizer, output_root, run_prefix, microbatches=None, device_count=1):
-    raw = read_yaml(ROOT / "configs/curriculum.yml")
+    raw = read_json(ROOT / "configs/curriculum.json")
     stages = curriculum(raw, microbatches, device_count)
-    model = read_yaml(ROOT / "configs/model.yml")
+    model = read_json(ROOT / "configs/model.json")
     out = Path(out).resolve()
     out.mkdir(parents=True, exist_ok=True)
     data_root, tokenizer = Path(data_root).resolve(), Path(tokenizer).resolve()
@@ -89,7 +87,7 @@ def generate(out, data_root, tokenizer, output_root, run_prefix, microbatches=No
     for i, s in enumerate(stages):
         s["memory_components"] = memory_components(model, s)
         cfg = dict(model)
-        cfg["base_config"] = "base.yml"  # resolved in installed MaxText configs
+        cfg["base_config"] = str(ROOT / "configs/maxtext-base.json")
         cfg.update(
             run_name=f"{run_prefix}-{s['name']}", base_output_directory=output_root,
             max_target_length=s["length"], per_device_batch_size=float(s["per_device_microbatch"]),
@@ -115,9 +113,10 @@ def generate(out, data_root, tokenizer, output_root, run_prefix, microbatches=No
     manifest = dict(maxtext_version=MAXTEXT_VERSION, stages=stages, device_count=device_count,
                     warmup_steps=raw["warmup_steps"], parameters=parameter_count(model),
                     approximate_loss_tokens=sum(s["loss_tokens"] for s in stages),
-                    curriculum_sha256=digest(ROOT / "configs/curriculum.yml"),
-                    sources_sha256=digest(ROOT / "configs/sources.yml"),
-                    model_sha256=digest(ROOT / "configs/model.yml"))
+                    curriculum_sha256=digest(ROOT / "configs/curriculum.json"),
+                    sources_sha256=digest(ROOT / "configs/sources.json"),
+                    model_sha256=digest(ROOT / "configs/model.json"),
+                    base_sha256=digest(ROOT / "configs/maxtext-base.json"))
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return manifest
 

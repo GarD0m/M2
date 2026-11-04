@@ -9,7 +9,7 @@ import math
 from statistics import median
 
 from llm5.launch import check_runtime, command, load_manifest
-from llm5.plan import generate, read_yaml
+from llm5.plan import generate, read_json
 
 
 def prepare_plan(manifest_path, device_count, microbatches=None):
@@ -39,7 +39,7 @@ def steady_step_seconds(path, skip_steps):
 
 
 def write_probe_config(stage, path, micro, device_count, steps, log_dir, probe_id, metrics_path):
-    config = read_yaml(stage["config"])
+    config = read_json(stage["config"])
     config.update(
         per_device_batch_size=float(micro/device_count),
         gradient_accumulation_steps=stage["effective_batch"]//micro,

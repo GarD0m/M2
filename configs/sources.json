@@ -1,0 +1,118 @@
+{
+  "general": {
+    "repo": "openbmb/Ultra-FineWeb-L3",
+    "revision": "bc3b1ba986fcaef6871b9790a413b16267c2de0f",
+    "column": "content",
+    "subsets": [
+      {
+        "config": "Ultra-FineWeb-L3-en-QA-Synthetic",
+        "split": "train",
+        "weight": 0.25
+      },
+      {
+        "config": "Ultra-FineWeb-L3-en-Multi-Style-Synthetic",
+        "split": "train",
+        "weight": 0.25
+      },
+      {
+        "config": "Ultra-FineWeb-L3-zh-QA-Synthetic",
+        "split": "train",
+        "weight": 0.25
+      },
+      {
+        "config": "Ultra-FineWeb-L3-zh-Multi-Style-Synthetic",
+        "split": "train",
+        "weight": 0.25
+      }
+    ]
+  },
+  "math": {
+    "repo": "openbmb/UltraData-Math",
+    "revision": "fe10db8efd35597fd7fcff8ff576b5ec4ea5ff87",
+    "column": "content",
+    "subsets": [
+      {
+        "config": "UltraData-Math-L3-Conversation-Synthetic",
+        "split": "train",
+        "weight": 0.25
+      },
+      {
+        "config": "UltraData-Math-L3-Multi-Style-Synthetic",
+        "split": "train",
+        "weight": 0.25
+      },
+      {
+        "config": "UltraData-Math-L3-QA-Synthetic",
+        "split": "train",
+        "weight": 0.25
+      },
+      {
+        "config": "UltraData-Math-L3-Textbook-Exercise-Synthetic",
+        "split": "train",
+        "weight": 0.25
+      }
+    ]
+  },
+  "code": {
+    "repo": "openbmb/UltraData-Code",
+    "revision": "8ce985cfd4522832c8b986e05968c87fffa0c66a",
+    "column": "content",
+    "subsets": [
+      {
+        "config": "UltraData-Code-L3",
+        "split": "py",
+        "weight": 1
+      },
+      {
+        "config": "UltraData-Code-L3",
+        "split": "cpp",
+        "weight": 1
+      },
+      {
+        "config": "UltraData-Code-L3",
+        "split": "java",
+        "weight": 1
+      },
+      {
+        "config": "UltraData-Code-L3",
+        "split": "js",
+        "weight": 1
+      },
+      {
+        "config": "UltraData-Code-L3",
+        "split": "go",
+        "weight": 1
+      },
+      {
+        "config": "UltraData-Code-L3",
+        "split": "rust",
+        "weight": 1
+      },
+      {
+        "config": "UltraData-Code-L3",
+        "split": "cs",
+        "weight": 1
+      },
+      {
+        "config": "UltraData-Code-L3",
+        "split": "php",
+        "weight": 1
+      },
+      {
+        "config": "UltraData-Code-L3",
+        "split": "r",
+        "weight": 1
+      },
+      {
+        "config": "UltraData-Code-L3",
+        "split": "rb",
+        "weight": 1
+      },
+      {
+        "config": "UltraData-Code-L3",
+        "split": "sh",
+        "weight": 1
+      }
+    ]
+  }
+}

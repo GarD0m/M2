@@ -7,7 +7,7 @@ from pathlib import Path
 import os, subprocess, sys
 
 REPO = next((p for p in (Path.cwd(), Path.cwd().parent)
-             if (p / "configs/curriculum.yml").exists()), Path("/content/M2"))
+             if (p / "configs/curriculum.json").exists()), Path("/content/M2"))
 if not (REPO / ".git").exists():
     subprocess.run(["git", "clone", "https://github.com/GarD0m/M2.git", str(REPO)], check=True)
 os.chdir(REPO)

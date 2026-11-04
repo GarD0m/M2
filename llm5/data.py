@@ -11,7 +11,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from tokenizers import Tokenizer
 
-from llm5.plan import ROOT, digest, read_yaml, curriculum
+from llm5.plan import ROOT, digest, read_json, curriculum
 
 DOMAINS = ("general", "math", "code")
 
@@ -34,7 +34,7 @@ def documents(domain, partition, seed=42, local_root=None, subset_index=None):
         return
     from datasets import load_dataset
     from pyarrow.dataset import ParquetFragmentScanOptions
-    source = read_yaml(ROOT / "configs/sources.yml")[domain]
+    source = read_json(ROOT / "configs/sources.json")[domain]
     active = []
     subsets = source["subsets"] if subset_index is None else [source["subsets"][subset_index]]
     for sub in subsets:
@@ -117,7 +117,7 @@ def write_shards(directory, prefix, count, length, streams, weights, seed):
 
 def prepare(out, tokenizer, eval_sequences=128, local_root=None, limit_stages=None):
     out = Path(out)
-    raw = read_yaml(ROOT / "configs/curriculum.yml")
+    raw = read_json(ROOT / "configs/curriculum.json")
     stages = curriculum(raw)
     tok = Tokenizer.from_file(str(Path(tokenizer) / "tokenizer.json"))
     if tok.get_vocab_size() != 65536 or tok.token_to_id("<|pad|>") != 0:
@@ -137,8 +137,8 @@ def prepare(out, tokenizer, eval_sequences=128, local_root=None, limit_stages=No
         write_shards(directory, "eval", eval_sequences, s["length"], streams["eval"],
                      [0.7, 0.1, 0.2], raw["seed"] + 100 + i)
         metadata = dict(stage=s, domain_sequences=counts, tokenizer_sha256=token_hash,
-                        curriculum_sha256=digest(ROOT / "configs/curriculum.yml"),
-                        sources_sha256=digest(ROOT / "configs/sources.yml"),
+                        curriculum_sha256=digest(ROOT / "configs/curriculum.json"),
+                        sources_sha256=digest(ROOT / "configs/sources.json"),
                         eval_sequences=eval_sequences, schema="length-L token list; native shift masks final target")
         (directory / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 

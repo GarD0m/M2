@@ -4,19 +4,19 @@ from types import SimpleNamespace
 
 import pytest
 
-from llm5.plan import ROOT, read_yaml, curriculum, memory_components
+from llm5.plan import ROOT, read_json, curriculum, memory_components
 from llm5.tune import candidates, steady_step_seconds
 from llm5.train import install_fused_qkv_muon_support
 from llm5.launch import command
 
 
 def test_bf16_tokamax_and_batch_accounting():
-    model = read_yaml(ROOT / "configs/model.yml")
+    model = read_json(ROOT / "configs/model.json")
     assert model["weight_dtype"] == "bfloat16"
     assert model["use_tokamax_splash"] is True
     assert model["fused_qkv"] is True and model["fused_mlp"] is True
     assert [model[f"sa_{x}_layout"] for x in "qkv"] == ["SEQ_MINOR"]*3
-    for stage in curriculum(read_yaml(ROOT / "configs/curriculum.yml")):
+    for stage in curriculum(read_json(ROOT / "configs/curriculum.json")):
         assert stage["microbatch"]*stage["length"] == 32768
         assert stage["accumulation"] == 16
         assert stage["effective_batch"] * stage["length"] == 524288
@@ -57,7 +57,7 @@ def test_fused_qkv_muon_axes():
     assert ns["transform_logic"](("self_attention", "qkv_proj", "kernel"), (2048,32,128)) == ((0,),(-2,-1))
     # The activation axis in fused gate/up MLP remains a batch of two matrices.
     assert ns["transform_logic"](("mlp", "wi", "kernel"), (2048,2,6144)) == ((0,),(-1,))
-    assert "llm5.train" in command("test.yml")
+    assert "llm5.train" in command("test.json")
 
 
 def test_tune_prepares_default_plan_and_applies_choice(tmp_path, monkeypatch):
@@ -66,7 +66,7 @@ def test_tune_prepares_default_plan_and_applies_choice(tmp_path, monkeypatch):
     path = tmp_path / "runs/plan-512k/manifest.json"
     manifest = prepare_plan(path, 8)
     assert path.exists()
-    config = read_yaml(manifest["stages"][0]["config"])
+    config = read_json(manifest["stages"][0]["config"])
     assert config["tokenizer_path"] == str(tmp_path / "models/tokenizer")
     selected = {s["name"]: s["effective_batch"] for s in manifest["stages"]}
     tuned = prepare_plan(path, 8, selected)
@@ -80,7 +80,7 @@ def test_probe_json_preserves_empty_checkpoint_strings(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     manifest = prepare_plan(tmp_path / "plan/manifest.json", 1)
     stage = manifest["stages"][1]
-    original = read_yaml(stage["config"])
+    original = read_json(stage["config"])
     assert original["load_full_state_path"]
     probe = tmp_path / "probe.json"
     write_probe_config(stage, probe, 1, 1, 12, tmp_path, "test", tmp_path / "metrics.jsonl")
@@ -90,7 +90,7 @@ def test_probe_json_preserves_empty_checkpoint_strings(tmp_path, monkeypatch):
     assert config["enable_checkpointing"] is False
     assert config["dataset_type"] == "synthetic"
     assert config["gradient_accumulation_steps"] == 256
-    assert read_yaml(stage["config"]) == original
+    assert read_json(stage["config"]) == original
     # Validate through the real OmegaConf loader used by MaxText.
     omegaconf = pytest.importorskip("omegaconf")
     loaded = omegaconf.OmegaConf.load(probe)
@@ -105,7 +105,7 @@ def test_probe_json_preserves_empty_checkpoint_strings(tmp_path, monkeypatch):
 def test_json_entrypoint_does_not_use_cli_value_parsing():
     from llm5.train import install_json_config_support
     def native(argv, **kwargs):
-        return "base.yml", argv[1:]
+        return "base.json", argv[1:]
     module = SimpleNamespace(_resolve_or_infer_config=native, resolve_config_path=lambda p: p)
     install_json_config_support(module)
     patched = module._resolve_or_infer_config
@@ -113,4 +113,4 @@ def test_json_entrypoint_does_not_use_cli_value_parsing():
     assert patched is module._resolve_or_infer_config
     assert patched(["train", "probe.json"]) == ("probe.json", [])
     assert patched(["train", "probe.json", "steps=3"]) == ("probe.json", ["steps=3"])
-    assert patched(["train", "model.yml"]) == native(["train", "model.yml"])
+    assert patched(["train", "other.txt"]) == native(["train", "other.txt"])

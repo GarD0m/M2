@@ -23,7 +23,7 @@ K 按 1024 解讀；10B token budget 按十進位。GQA head 數、tied embeddin
 
 ## Sequence length curriculum
 
-常用名稱為 **sequence length curriculum（序列長度課程）**，設定在 [`configs/curriculum.yml`](configs/curriculum.yml)。比例是 math/code 所屬資料來源的 token 比例，不是難度等級。
+常用名稱為 **sequence length curriculum（序列長度課程）**，設定在 [`configs/curriculum.json`](configs/curriculum.json)。比例是 math/code 所屬資料來源的 token 比例，不是難度等級。
 
 | Context | 約 token 預算 | Math | Code | General | 初始 microbatch | GA | Optimizer steps |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -89,7 +89,7 @@ python -m llm5.launch --execute
 
 ## 資料與 tokenizer
 
-[`configs/sources.yml`](configs/sources.yml) 固定三組資料來源的 revision 與子集：
+[`configs/sources.json`](configs/sources.json) 固定三組資料來源的 revision 與子集：
 
 - General：[Ultra-FineWeb-L3](https://huggingface.co/datasets/openbmb/Ultra-FineWeb-L3)，中英文、QA 與 multi-style 四個子集。
 - Math：[UltraData-Math](https://huggingface.co/datasets/openbmb/UltraData-Math)，只取四個 L3 子集。
@@ -109,7 +109,7 @@ python -m llm5.launch --execute
 
 `requirements.txt` 是專案維護的 Colab TPU 安裝清單，參照使用者提供的 `pip-freeze.tpu.txt`，保留 JAX/JAXlib 0.11.2、libtpu 0.0.50 等核心版本，並使用符合 MaxText NNX 需求的 Flax。原始 freeze 只作參考，不直接重裝 Colab 本機套件路徑。MaxText 不使用 `[tpu]` extra，因為其 0.2.5 套件宣告包含 SymPy/mpmath 衝突；本專案明列 runtime 依賴，採用相容的 SymPy 1.14.0／mpmath 1.3.0。已完成 Linux Python 3.13 的依賴解析，尚未在 Colab TPU 執行完整安裝及訓練。
 
-產生的 stage 和 probe 設定使用 JSON；`llm5.train` 為 MaxText 0.2.5 補上 `.json` 設定入口。每個 probe 使用獨立 JSON 文件，明確設定 `"load_full_state_path": ""` 和 `"load_parameters_path": ""`，不透過 CLI 的空值覆寫，以免被解析成 null。失敗時 tune 直接顯示子程序 log 最後 80 行。
+專案設定全部使用 JSON：`configs/model.json`、`configs/curriculum.json`、`configs/sources.json`、`configs/maxtext-base.json`，以及產生的 stage 和 probe 設定。MaxText 0.2.5 預設設定已轉成專案內的 `maxtext-base.json`；不修改安裝的套件。`llm5.train` 補上 `.json` 設定入口。每個 probe 使用獨立 JSON 文件，明確設定 `"load_full_state_path": ""` 和 `"load_parameters_path": ""`，不透過 CLI 的空值覆寫，以免被解析成 null。失敗時 tune 直接顯示子程序 log 最後 80 行。
 
 安裝 requirements 並進入專案目錄後，直接執行 synthetic batch/GA 測速，不需要先執行其他設定 blocks 或準備訓練資料：
 

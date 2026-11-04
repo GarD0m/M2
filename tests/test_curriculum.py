@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from llm5.plan import ROOT, curriculum, generate, read_yaml
+from llm5.plan import ROOT, curriculum, generate, read_json
 from llm5.data import TokenStream, domain_order, is_eval, write_shards
 from llm5.tokenizer import build_bpe
 from llm5.tune import is_oom
@@ -21,7 +21,7 @@ def test_curriculum_preserves_batch_and_step_continuity(tmp_path):
     assert [s["length"] for s in stages] == [1024, 2048, 4096, 8192, 16384, 32768]
     assert abs(m["approximate_loss_tokens"] - 10_000_000_000) < 6 * 524288
     for i, s in enumerate(stages):
-        cfg = read_yaml(s["config"])
+        cfg = read_json(s["config"])
         assert s["microbatch"] * s["accumulation"] == s["effective_batch"]
         assert int(cfg["warmup_steps_fraction"] * cfg["learning_rate_schedule_steps"]) == 64
         assert cfg["wsd_decay_steps_fraction"] == 0
@@ -37,7 +37,7 @@ def test_curriculum_preserves_batch_and_step_continuity(tmp_path):
 
 
 def test_rejects_invalid_curriculum():
-    raw = read_yaml(ROOT / "configs/curriculum.yml")
+    raw = read_json(ROOT / "configs/curriculum.json")
     with pytest.raises(ValueError):
         curriculum(raw, {"1k": 3})
     bad = copy.deepcopy(raw)
@@ -110,8 +110,8 @@ UPSTREAM = ROOT / "upstream/maxtext/src/maxtext"
 
 @pytest.mark.skipif(not UPSTREAM.exists(), reason="Pinned upstream checkout unavailable")
 def test_config_keys_and_native_shift():
-    base = read_yaml(UPSTREAM / "configs/base.yml")
-    cfg = read_yaml(ROOT / "configs/model.yml")
+    base = read_json(ROOT / "configs/maxtext-base.json")
+    cfg = read_json(ROOT / "configs/model.json")
     assert not (cfg.keys() - base.keys() - {"base_config"})
     src = UPSTREAM / "input_pipeline/input_pipeline_utils.py"
     module = ast.parse(src.read_text(encoding="utf-8"))
@@ -151,7 +151,7 @@ def test_native_wso_schedule_has_no_decay():
                 and n.name == "create_learning_rate_schedule")
     ns = {"jnp": np, "optax": optax, "types": types}
     exec(compile(ast.Module(body=[func], type_ignores=[]), str(src), "exec"), ns)
-    raw = read_yaml(ROOT / "configs/curriculum.yml")
+    raw = read_json(ROOT / "configs/curriculum.json")
     stages = curriculum(raw)
     total_steps = stages[-1]["end_step"]
     warmup = raw["warmup_steps"]

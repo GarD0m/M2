@@ -9,13 +9,14 @@ import subprocess
 import sys
 
 import pyarrow.parquet as pq
-from llm5.plan import MAXTEXT_VERSION, ROOT, digest, read_yaml
+from llm5.plan import MAXTEXT_VERSION, ROOT, digest, read_json
 
 
 def load_manifest(path):
     manifest = json.loads(Path(path).read_text(encoding="utf-8"))
-    for key, file in [("curriculum_sha256", "curriculum.yml"),
-                      ("sources_sha256", "sources.yml"), ("model_sha256", "model.yml")]:
+    for key, file in [("curriculum_sha256", "curriculum.json"),
+                      ("sources_sha256", "sources.json"), ("model_sha256", "model.json"),
+                      ("base_sha256", "maxtext-base.json")]:
         if manifest[key] != digest(ROOT / "configs" / file):
             raise ValueError(f"{file} changed; regenerate plan and, where relevant, packed data")
     if manifest["maxtext_version"] != MAXTEXT_VERSION:
@@ -24,7 +25,7 @@ def load_manifest(path):
 
 
 def check_data(stage):
-    cfg = read_yaml(stage["config"])
+    cfg = read_json(stage["config"])
     tokenizer = Path(cfg["tokenizer_path"])
     from tokenizers import Tokenizer
     tok = Tokenizer.from_file(str(tokenizer / "tokenizer.json"))
@@ -37,7 +38,7 @@ def check_data(stage):
     meta = json.loads((Path(train_files[0]).parent / "metadata.json").read_text())
     if meta["tokenizer_sha256"] != digest(tokenizer / "tokenizer.json"):
         raise ValueError("Packed data belongs to a different tokenizer")
-    for key, file in [("curriculum_sha256", "curriculum.yml"), ("sources_sha256", "sources.yml")]:
+    for key, file in [("curriculum_sha256", "curriculum.json"), ("sources_sha256", "sources.json")]:
         if meta[key] != digest(ROOT / "configs" / file):
             raise ValueError(f"Packed data predates {file}; prepare data in a new directory")
     if (meta["stage"]["length"], meta["stage"]["sequences"]) != (stage["length"], stage["sequences"]):
@@ -89,7 +90,7 @@ def main():
     for s in manifest["stages"]:
         if args.check_data or args.execute:
             check_data(s)
-        cfg = read_yaml(s["config"])
+        cfg = read_json(s["config"])
         cmd = command(s["config"])
         print(shlex.join(cmd), flush=True)
         if not args.execute:

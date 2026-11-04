@@ -1,10 +1,10 @@
 import pytest
-from llm5.plan import ROOT, read_yaml, curriculum, generate
+from llm5.plan import ROOT, read_json, curriculum, generate
 from llm5.tune import candidates
 
 
 def test_eight_devices_keep_global_batch_and_data_budget(tmp_path):
-    raw = read_yaml(ROOT / "configs/curriculum.yml")
+    raw = read_json(ROOT / "configs/curriculum.json")
     single = curriculum(raw)
     multi = curriculum(raw, device_count=8)
     for a, b in zip(single, multi):
@@ -17,13 +17,13 @@ def test_eight_devices_keep_global_batch_and_data_budget(tmp_path):
     m = generate(tmp_path / "plan", tmp_path / "data", tmp_path / "tok",
                  "gs://example/m2", "test", device_count=8)
     for stage in m["stages"]:
-        cfg = read_yaml(stage["config"])
+        cfg = read_json(stage["config"])
         assert cfg["ici_data_parallelism"] == 8
         assert cfg["per_device_batch_size"]*8*cfg["gradient_accumulation_steps"]*stage["length"] == 524288
     assert candidates(16, 32768, device_count=8) == [8, 16]
 
 
 def test_invalid_global_microbatch_rejected():
-    raw = read_yaml(ROOT / "configs/curriculum.yml")
+    raw = read_json(ROOT / "configs/curriculum.json")
     with pytest.raises(ValueError):
         curriculum(raw, {"32k": 1}, device_count=8)
