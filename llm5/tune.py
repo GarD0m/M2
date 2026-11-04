@@ -9,7 +9,12 @@ import math
 from statistics import median
 
 from llm5.launch import check_runtime, command, load_manifest
-from llm5.plan import read_yaml
+from llm5.plan import generate
+
+
+def prepare_plan(manifest_path, device_count, microbatches=None):
+    return generate(Path(manifest_path).parent, "data/packed-512k", "models/tokenizer",
+                    "runs/checkpoints", "m2-bf16-512k-v1", microbatches, device_count)
 
 
 def is_oom(log):
@@ -41,11 +46,15 @@ def main():
     p.add_argument("--steps", type=int, default=12)
     p.add_argument("--skip-steps", type=int, default=4)
     p.add_argument("--max-micro-tokens", type=int, default=131072)
+    p.add_argument("--prepare-plan", action="store_true",
+                   help="Generate the default 512K plan before tuning and apply selected microbatches afterwards")
     args = p.parse_args()
     if args.skip_steps < 1 or args.steps < args.skip_steps + 3:
         p.error("Reserve at least three measured steps after warmup")
     os.environ.setdefault("JAX_PLATFORMS", "tpu")
     device_count = check_runtime()
+    if args.prepare_plan:
+        prepare_plan(args.manifest, device_count)
     manifest = load_manifest(args.manifest)
     if device_count != manifest["device_count"]:
         raise RuntimeError(f"Regenerate plan with --device-count {device_count}")
@@ -86,7 +95,11 @@ def main():
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(chosen, indent=2), encoding="utf-8")
     output.with_suffix(".report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
-    print(f"Saved {output}; regenerate the plan with --microbatches {output}")
+    if args.prepare_plan:
+        prepare_plan(args.manifest, device_count, chosen)
+        print(f"Saved {output}; applied selected microbatches to {Path(args.manifest).parent}")
+    else:
+        print(f"Saved {output}; regenerate the plan with --microbatches {output}")
 
 
 if __name__ == "__main__":

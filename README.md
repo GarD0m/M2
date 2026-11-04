@@ -36,7 +36,7 @@ K 按 1024 解讀；10B token budget 按十進位。GQA head 數、tied embeddin
 
 單顆 TPU 上 `per_device_batch_size` 是 microbatch；GA 為 `gradient_accumulation_steps`。每次 optimizer update 的容量為 **524,288 tokens（512K）**，總計約 **10.0B loss tokens／19,080 updates**。有效 sequence batch 依序為 512、256、128、64、32、16。以完整 batch 取整，不做精確 token 尾批截斷。Native Grain shift 會遮罩每列最後一個 target，預算估算已扣掉此位置。
 
-完整 notebook：[M2_TPU_v6e_512K.ipynb](notebooks/M2_TPU_v6e_512K.ipynb)；各 code block 的文字版：[BLOCKS.md](notebooks/BLOCKS.md)。直接在 Colab TPU runtime 使用 `%pip` 安裝，不建立 venv、不限制或檢查 TPU 型號。已完成的 tokenizer 隨專案放在 `models/tokenizer`，notebook 直接離線驗證及使用，不重新訓練 tokenizer。只讀取裝置數來換算 global microbatch、每裝置 microbatch 和 GA，確保有效 batch 仍為 512K tokens。
+完整 notebook：[M2_TPU_v6e_512K.ipynb](notebooks/M2_TPU_v6e_512K.ipynb)；各 code block 的文字版：[BLOCKS.md](notebooks/BLOCKS.md)。原本的安裝、路徑設定、tokenizer 驗證及 plan 產生四格（舊第 2–5 格）已移除。安裝獨立執行 `%pip install -r requirements.txt`；notebook 現在依序為取得專案、tune、準備資料、驗證、訓練。Tune 的 `--prepare-plan` 自動以預設路徑產生 plan，完成後套用測速選出的 microbatch。不建立 venv、不限制或檢查 TPU 型號；只讀取裝置數換算 batch，確保有效 batch 仍為 512K tokens。已完成的 tokenizer 隨專案放在 `models/tokenizer`。
 
 每階段使用獨立 `run_name`。`steps` 是累計結束步數；後一階段從前一階段的 **full state checkpoint** 載入，保留 weights、Muon/AdamW momentum、optimizer counters 和全域 step。新的長度建立新的資料 iterator；同一階段中斷續訓則由 MaxText 自動載入該階段 checkpoint 和 Grain iterator。六階段共用完整 LR schedule，不重新 warmup、不在最後衰減。
 
@@ -109,10 +109,10 @@ python -m llm5.launch --execute
 
 `requirements.txt` 是專案維護的 Colab TPU 安裝清單，參照使用者提供的 `pip-freeze.tpu.txt`，保留 JAX/JAXlib 0.11.2、libtpu 0.0.50 等核心版本，並使用符合 MaxText NNX 需求的 Flax。原始 freeze 只作參考，不直接重裝 Colab 本機套件路徑。MaxText 不使用 `[tpu]` extra，因為其 0.2.5 套件宣告包含 SymPy/mpmath 衝突；本專案明列 runtime 依賴，採用相容的 SymPy 1.14.0／mpmath 1.3.0。已完成 Linux Python 3.13 的依賴解析，尚未在 Colab TPU 執行完整安裝及訓練。
 
-完成 notebook blocks 1–5 後，不用先準備訓練資料即可執行 synthetic batch/GA 測速：
+安裝 requirements 並進入專案目錄後，直接執行 synthetic batch/GA 測速，不需要先執行其他設定 blocks 或準備訓練資料：
 
 ```bash
-python -m llm5.tune --manifest runs/plan-512k/manifest.json --out runs/microbatches-512k.json --log-dir runs/probes-512k --steps 12 --skip-steps 4 --max-micro-tokens 131072
+python -m llm5.tune --prepare-plan --manifest runs/plan-512k/manifest.json --out runs/microbatches-512k.json --log-dir runs/probes-512k --steps 12 --skip-steps 4 --max-micro-tokens 131072
 ```
 
 官方框架參考：[MaxText 0.2.5](https://pypi.org/project/maxtext/0.2.5/)、[安裝流程](https://maxtext.readthedocs.io/en/latest/install_maxtext.html)。

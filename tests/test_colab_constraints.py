@@ -10,9 +10,10 @@ def test_requirements_use_release_versions_and_portable_sources():
     assert "jax==0.11.2" in requirements and "mpmath==1.3.0" in requirements
 
 
-def test_colab_install_uses_version_and_never_clones_maxtext():
+def test_notebook_tune_does_not_depend_on_removed_setup_blocks():
     block = runpy.run_path(str(ROOT / "scripts/build_notebook.py"))["BLOCKS"][1][1]
-    assert "%pip install -r requirements.txt" in block
+    assert "--prepare-plan" in block
+    assert "PLAN_ARGS" not in block and "PYTHON" not in block
     assert "git clone" not in block and "archive/" not in block
 
 

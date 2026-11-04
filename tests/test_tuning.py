@@ -58,3 +58,18 @@ def test_fused_qkv_muon_axes():
     # The activation axis in fused gate/up MLP remains a batch of two matrices.
     assert ns["transform_logic"](("mlp", "wi", "kernel"), (2048,2,6144)) == ((0,),(-1,))
     assert "llm5.train" in command("test.yml")
+
+
+def test_tune_prepares_default_plan_and_applies_choice(tmp_path, monkeypatch):
+    from llm5.tune import prepare_plan
+    monkeypatch.chdir(tmp_path)
+    path = tmp_path / "runs/plan-512k/manifest.json"
+    manifest = prepare_plan(path, 8)
+    assert path.exists()
+    config = read_yaml(manifest["stages"][0]["config"])
+    assert config["tokenizer_path"] == str(tmp_path / "models/tokenizer")
+    selected = {s["name"]: s["effective_batch"] for s in manifest["stages"]}
+    tuned = prepare_plan(path, 8, selected)
+    for stage in tuned["stages"]:
+        assert stage["accumulation"] == 1
+        assert stage["per_device_microbatch"]*8*stage["length"] == 524288

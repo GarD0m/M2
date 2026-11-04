@@ -8,14 +8,15 @@ def test_notebook_blocks_compile_and_are_unexecuted():
     assert notebook["nbformat"] == 4
     assert len({c["id"] for c in notebook["cells"]}) == len(notebook["cells"])
     cells = [c for c in notebook["cells"] if c["cell_type"] == "code"]
-    assert len(cells) == 9
+    assert len(cells) == 5
     for c in cells:
         assert c["outputs"] == [] and c["execution_count"] is None
         source = "".join(c["source"])
         python = "\n".join("pass" if line.startswith("%pip ") else line for line in source.splitlines())
         compile(python, c["id"], "exec")
     code = "\n".join("".join(c["source"]) for c in cells)
-    assert "%pip install" in code and ".venv" not in code
+    assert "%pip install" not in code and ".venv" not in code
+    assert "--prepare-plan" in code
 
 
 def test_bundled_tokenizer_matches_metadata():
