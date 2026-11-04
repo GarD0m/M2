@@ -8,6 +8,7 @@ import shutil
 from tempfile import TemporaryDirectory
 
 from huggingface_hub import HfApi, hf_hub_download, snapshot_download, get_token
+from huggingface_hub.utils import disable_progress_bars
 from huggingface_hub.errors import EntryNotFoundError
 from tqdm.auto import tqdm
 from llm5.plan import ROOT, digest, read_json
@@ -15,6 +16,8 @@ from llm5.plan import ROOT, digest, read_json
 
 class CheckpointHub:
     def __init__(self, repo, manifest):
+        os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+        disable_progress_bars()
         token = get_token()
         if not token:
             raise ValueError("Set HF_TOKEN before starting checkpoint uploads")
@@ -27,6 +30,7 @@ class CheckpointHub:
         self.fingerprints = {k: manifest[k] for k in
                              ("curriculum_sha256", "sources_sha256", "model_sha256", "base_sha256", "maxtext_version")}
         self.fingerprints["tokenizer_sha256"] = digest(Path(self.configs[0]["tokenizer_path"]) / "tokenizer.json")
+        self.fingerprints["input_pipeline"] = manifest["input_pipeline"]
         self.api.create_repo(repo_id=repo, repo_type="model", private=True, exist_ok=True)
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="hf-checkpoint")
         self.futures, self.queued = [], set()
@@ -35,6 +39,11 @@ class CheckpointHub:
     def directory(self, index, step):
         cfg = self.configs[index]
         return Path(cfg["base_output_directory"]) / cfg["run_name"] / "checkpoints" / str(step)
+
+    def validate_cursor(self, index, step):
+        path = self.directory(index, step) / "iter/process_0-of-1.json"
+        if not path.exists() or read_json(path).get("format") != self.manifest["input_pipeline"]:
+            raise ValueError(f"Checkpoint has no compatible HF streaming cursor: {path}")
 
     def check(self):
         for future in self.futures:
@@ -93,9 +102,11 @@ class CheckpointHub:
                     if not (source / "items").is_dir():
                         raise ValueError("Hub checkpoint has no full-state items directory")
                     os.replace(source, target)
+                self.validate_cursor(index, step)
                 return {"index": index, "step": step}
         if local:
             step, index = max(local)
+            self.validate_cursor(index, step)
             self.enqueue(index, step)
             tqdm.write(f"Resuming local {self.configs[index]['run_name']} step {step}")
             return {"index": index, "step": step}

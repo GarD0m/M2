@@ -155,6 +155,8 @@ def install_fused_qkv_muon_support(module=None):
 
 
 def main():
+    from llm5.streaming import install_streaming_input
+    install_streaming_input()
     install_json_config_support()
     install_fused_qkv_muon_support()
     install_metric_diagnostics()
@@ -168,9 +170,12 @@ def run_training_config(config_path, start_step=0, checkpoint_hub=None):
     global _TRAINING_PROGRESS
     config = json.loads(Path(config_path).read_text(encoding="utf-8"))
     previous = _TRAINING_PROGRESS
-    with tqdm(total=config["steps"]-start_step, desc=config["run_name"], unit="step", mininterval=1.0) as progress:
+    with tqdm(total=config["steps"]-start_step, desc=config["run_name"], unit="step", mininterval=1.0,
+              position=0, leave=False, dynamic_ncols=True) as progress:
         _TRAINING_PROGRESS = {"bar": progress, "start_step": start_step, "initialized": False}
         try:
+            from llm5.streaming import install_streaming_input
+            install_streaming_input()
             install_json_config_support()
             install_fused_qkv_muon_support()
             install_metric_diagnostics()

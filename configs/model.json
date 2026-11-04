@@ -60,6 +60,7 @@
   "tokenizer_type": "huggingface",
   "dataset_type": "grain",
   "grain_file_type": "parquet",
+  "hf_path": "openbmb/Ultra-FineWeb-L3",
   "tokenize_train_data": false,
   "tokenize_eval_data": false,
   "train_data_columns": [

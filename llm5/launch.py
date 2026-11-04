@@ -1,13 +1,11 @@
 """Validate and run the native MaxText sequence length curriculum."""
 import argparse
-import glob
 import json
 import os
 from pathlib import Path
 import shlex
 import sys
 
-import pyarrow.parquet as pq
 from llm5.plan import MAXTEXT_VERSION, ROOT, digest, read_json
 from llm5.train import run_training_config
 
@@ -18,7 +16,7 @@ def load_manifest(path):
                       ("sources_sha256", "sources.json"), ("model_sha256", "model.json"),
                       ("base_sha256", "maxtext-base.json")]:
         if manifest[key] != digest(ROOT / "configs" / file):
-            raise ValueError(f"{file} changed; regenerate plan and, where relevant, packed data")
+            raise ValueError(f"{file} changed; regenerate the plan")
     if manifest["maxtext_version"] != MAXTEXT_VERSION:
         raise ValueError("Unexpected MaxText revision")
     return manifest
@@ -31,29 +29,10 @@ def check_data(stage):
     tok = Tokenizer.from_file(str(tokenizer / "tokenizer.json"))
     if tok.get_vocab_size() != cfg["vocab_size"] or tok.token_to_id("<|pad|>") != 0:
         raise ValueError("Tokenizer vocabulary or PAD ID mismatch")
-    train_files = sorted(glob.glob(cfg["grain_train_files"]))
-    eval_files = sorted(glob.glob(cfg["grain_eval_files"]))
-    if not train_files or not eval_files:
-        raise FileNotFoundError(f"Missing packed train/eval data for {stage['name']}")
-    meta = json.loads((Path(train_files[0]).parent / "metadata.json").read_text())
-    if meta["tokenizer_sha256"] != digest(tokenizer / "tokenizer.json"):
-        raise ValueError("Packed data belongs to a different tokenizer")
-    for key, file in [("curriculum_sha256", "curriculum.json"), ("sources_sha256", "sources.json")]:
-        if meta[key] != digest(ROOT / "configs" / file):
-            raise ValueError(f"Packed data predates {file}; prepare data in a new directory")
-    if (meta["stage"]["length"], meta["stage"]["sequences"]) != (stage["length"], stage["sequences"]):
-        raise ValueError("Packed data length or sequence budget mismatch")
-    count = sum(pq.ParquetFile(f).metadata.num_rows for f in train_files)
-    if count != stage["sequences"]:
-        raise ValueError(f"Expected {stage['sequences']} sequences; found {count}")
-    eval_count = sum(pq.ParquetFile(f).metadata.num_rows for f in eval_files)
-    if eval_count < cfg["eval_steps"]:
-        raise ValueError("Too few eval records")
-    for file in (train_files[0], train_files[-1], eval_files[0]):
-        table = pq.ParquetFile(file).read_row_group(0, columns=["text"])
-        for row in table.column("text").to_pylist():
-            if len(row) != stage["length"] or min(row) <= 0 or max(row) >= cfg["vocab_size"]:
-                raise ValueError(f"Invalid token length or range in {file}")
+    if tok.token_to_id("<|endoftext|>") is None:
+        raise ValueError("Tokenizer has no EOS token")
+    if cfg["max_target_length"] != stage["length"]:
+        raise ValueError("Streaming sequence length differs from the plan")
 
 
 def check_runtime():
@@ -106,6 +85,11 @@ def main(argv=None, checkpoint_hub=None, resume=None):
         if epath.Path(checkpoint_items(cfg, s["end_step"])).exists():
             print(f"{s['name']} complete; keeping its saved full state", flush=True)
             continue
+        if resume is not None and resume["index"] == index:
+            # Native auto-restore loads this stage's items AND streaming cursor.
+            # A fresh runtime need not download the preceding stage as well.
+            cfg["load_full_state_path"] = ""
+            Path(s["config"]).write_text(json.dumps(cfg, indent=2), encoding="utf-8")
         if cfg["load_full_state_path"] and not epath.Path(cfg["load_full_state_path"]).exists():
             raise FileNotFoundError(f"Previous stage full checkpoint missing: {cfg['load_full_state_path']}")
         run_training_config(s["config"], start_step=s["start_step"], checkpoint_hub=checkpoint_hub)

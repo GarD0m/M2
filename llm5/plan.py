@@ -72,13 +72,13 @@ def memory_components(model, stage):
     }
 
 
-def generate(out, data_root, tokenizer, output_root, run_prefix, device_count=1):
+def generate(out, tokenizer, output_root, run_prefix, device_count=1):
     raw = read_json(ROOT / "configs/curriculum.json")
     stages = curriculum(raw, device_count)
     model = read_json(ROOT / "configs/model.json")
     out = Path(out).resolve()
     out.mkdir(parents=True, exist_ok=True)
-    data_root, tokenizer = Path(data_root).resolve(), Path(tokenizer).resolve()
+    tokenizer = Path(tokenizer).resolve()
     if not output_root.startswith("gs://"):
         output_root = Path(output_root).resolve().as_posix()
     total_steps = stages[-1]["end_step"]
@@ -95,8 +95,6 @@ def generate(out, data_root, tokenizer, output_root, run_prefix, device_count=1)
             # Upstream casts fraction*total_steps to int; guard float roundoff.
             warmup_steps_fraction=(raw["warmup_steps"] + 0.01) / total_steps,
             tokenizer_path=str(tokenizer), data_shuffle_seed=raw["seed"], init_weights_seed=raw["seed"],
-            grain_train_files=str(data_root / s["name"] / "train-*.parquet"),
-            grain_eval_files=str(data_root / s["name"] / "eval-*.parquet"),
             load_full_state_path="",
         )
         if i:
@@ -108,7 +106,7 @@ def generate(out, data_root, tokenizer, output_root, run_prefix, device_count=1)
         path = out / f"{s['name']}.json"
         path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
         s["config"] = str(path)
-    manifest = dict(maxtext_version=MAXTEXT_VERSION, stages=stages, device_count=device_count,
+    manifest = dict(maxtext_version=MAXTEXT_VERSION, stages=stages, device_count=device_count, input_pipeline="hf-stream-v1",
                     warmup_steps=raw["warmup_steps"], parameters=parameter_count(model),
                     approximate_loss_tokens=sum(s["loss_tokens"] for s in stages),
                     curriculum_sha256=digest(ROOT / "configs/curriculum.json"),
@@ -122,8 +120,7 @@ def generate(out, data_root, tokenizer, output_root, run_prefix, device_count=1)
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--out", default="runs/plan")
-    p.add_argument("--data-root", default="data/packed")
-    p.add_argument("--tokenizer", default="artifacts/tokenizer")
+    p.add_argument("--tokenizer", default="models/tokenizer")
     p.add_argument("--output-root", default="runs/checkpoints")
     p.add_argument("--run-prefix", default="llm5")
     p.add_argument("--device-count", type=int, default=1)
