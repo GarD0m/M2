@@ -9,7 +9,7 @@ import math
 from statistics import median
 
 from llm5.launch import check_runtime, command, load_manifest
-from llm5.plan import generate
+from llm5.plan import generate, read_yaml
 
 
 def prepare_plan(manifest_path, device_count, microbatches=None):
@@ -36,6 +36,27 @@ def steady_step_seconds(path, skip_steps):
     if len(times) < 3 or any(not math.isfinite(t) or t <= 0 for t in times):
         raise ValueError(f"Insufficient valid steady-state timing metrics: {path}")
     return median(times)
+
+
+def write_probe_config(stage, path, micro, device_count, steps, log_dir, probe_id, metrics_path):
+    config = read_yaml(stage["config"])
+    config.update(
+        per_device_batch_size=float(micro/device_count),
+        gradient_accumulation_steps=stage["effective_batch"]//micro,
+        steps=steps, dataset_type="synthetic", eval_interval=-1,
+        load_full_state_path="", load_parameters_path="",
+        enable_checkpointing=False, save_checkpoint_on_start=False,
+        save_checkpoint_on_completion=False, async_checkpointing=False,
+        base_output_directory=str(log_dir), run_name=f"probe-{probe_id}",
+        metrics_file=str(metrics_path), max_inflight_computations=1,
+        profile_cleanly=True, log_period=1,
+    )
+    Path(path).write_text(json.dumps(config, indent=2), encoding="utf-8")
+
+
+def probe_error(log_path, returncode):
+    tail = "\n".join(Path(log_path).read_text(encoding="utf-8", errors="replace").splitlines()[-80:])
+    return f"Probe exited with code {returncode}. Log: {log_path}\n{tail}"
 
 
 def main():
@@ -67,26 +88,19 @@ def main():
         for micro in candidates(s["effective_batch"], s["length"], args.max_micro_tokens, device_count):
             probe_id = f"{s['name']}-{micro}-{time.time_ns()}"
             metrics_path = log_dir / f"{probe_id}.jsonl"
-            overrides = [f"per_device_batch_size={float(micro/device_count)}",
-                         f"gradient_accumulation_steps={s['effective_batch'] // micro}",
-                         f"steps={args.steps}", "dataset_type=synthetic", "eval_interval=-1",
-                         "load_full_state_path=", "enable_checkpointing=false",
-                         "save_checkpoint_on_start=false", "save_checkpoint_on_completion=false",
-                         f"base_output_directory={log_dir.as_posix()}",
-                         f"run_name=probe-{probe_id}", f"metrics_file={metrics_path.as_posix()}",
-                         "max_inflight_computations=1", "profile_cleanly=true",
-                         "async_checkpointing=false", "log_period=1"]
+            config_path = log_dir / f"{probe_id}.json"
+            write_probe_config(s, config_path, micro, device_count, args.steps, log_dir, probe_id, metrics_path)
             log_path = log_dir / f"{s['name']}-micro{micro}.log"
             print(f"Probing {s['name']} micro={micro} GA={s['effective_batch'] // micro}", flush=True)
             with log_path.open("w", encoding="utf-8") as log:
-                result = subprocess.run(command(s["config"], overrides), stdout=log, stderr=subprocess.STDOUT)
+                result = subprocess.run(command(config_path), stdout=log, stderr=subprocess.STDOUT)
             if result.returncode == 0:
                 seconds = steady_step_seconds(metrics_path, args.skip_steps)
                 results.append(dict(microbatch=micro, accumulation=s["effective_batch"]//micro,
                                     median_step_seconds=seconds, loss_tokens_per_second=s["tokens_per_step"]/seconds))
                 print(f"Median step: {seconds:.4f}s; {s['tokens_per_step']/seconds:,.0f} loss tokens/s", flush=True)
             elif not is_oom(log_path.read_text(encoding="utf-8", errors="replace")):
-                raise RuntimeError(f"Probe failed for a reason other than OOM; inspect {log_path}")
+                raise RuntimeError(probe_error(log_path, result.returncode))
         if not results:
             raise RuntimeError(f"No fitting microbatch for {s['name']}; inspect {log_dir}.")
         best = min(results, key=lambda r: r["median_step_seconds"])

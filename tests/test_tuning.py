@@ -73,3 +73,44 @@ def test_tune_prepares_default_plan_and_applies_choice(tmp_path, monkeypatch):
     for stage in tuned["stages"]:
         assert stage["accumulation"] == 1
         assert stage["per_device_microbatch"]*8*stage["length"] == 524288
+
+
+def test_probe_json_preserves_empty_checkpoint_strings(tmp_path, monkeypatch):
+    from llm5.tune import prepare_plan, write_probe_config, probe_error
+    monkeypatch.chdir(tmp_path)
+    manifest = prepare_plan(tmp_path / "plan/manifest.json", 1)
+    stage = manifest["stages"][1]
+    original = read_yaml(stage["config"])
+    assert original["load_full_state_path"]
+    probe = tmp_path / "probe.json"
+    write_probe_config(stage, probe, 1, 1, 12, tmp_path, "test", tmp_path / "metrics.jsonl")
+    config = json.loads(probe.read_text())
+    assert config["load_full_state_path"] == ""
+    assert config["load_parameters_path"] == ""
+    assert config["enable_checkpointing"] is False
+    assert config["dataset_type"] == "synthetic"
+    assert config["gradient_accumulation_steps"] == 256
+    assert read_yaml(stage["config"]) == original
+    # Validate through the real OmegaConf loader used by MaxText.
+    omegaconf = pytest.importorskip("omegaconf")
+    loaded = omegaconf.OmegaConf.load(probe)
+    assert isinstance(loaded.load_full_state_path, str)
+    assert loaded.load_full_state_path == ""
+    assert loaded.enable_checkpointing is False
+    log = tmp_path / "failure.log"
+    log.write_text("ValidationError: load_full_state_path\n", encoding="utf-8")
+    assert "ValidationError: load_full_state_path" in probe_error(log, 1)
+
+
+def test_json_entrypoint_does_not_use_cli_value_parsing():
+    from llm5.train import install_json_config_support
+    def native(argv, **kwargs):
+        return "base.yml", argv[1:]
+    module = SimpleNamespace(_resolve_or_infer_config=native, resolve_config_path=lambda p: p)
+    install_json_config_support(module)
+    patched = module._resolve_or_infer_config
+    install_json_config_support(module)
+    assert patched is module._resolve_or_infer_config
+    assert patched(["train", "probe.json"]) == ("probe.json", [])
+    assert patched(["train", "probe.json", "steps=3"]) == ("probe.json", ["steps=3"])
+    assert patched(["train", "model.yml"]) == native(["train", "model.yml"])

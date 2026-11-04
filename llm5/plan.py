@@ -10,7 +10,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def read_yaml(path):
-    return yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    text = Path(path).read_text(encoding="utf-8")
+    return json.loads(text) if Path(path).suffix == ".json" else yaml.safe_load(text)
 
 
 def digest(path):
@@ -108,8 +109,8 @@ def generate(out, data_root, tokenizer, output_root, run_prefix, microbatches=No
             cfg["load_full_state_path"] = (
                 f"{output_root.rstrip('/')}/{run_prefix}-{prev['name']}/checkpoints/{prev['end_step']}/items"
             )
-        path = out / f"{s['name']}.yml"
-        path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+        path = out / f"{s['name']}.json"
+        path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
         s["config"] = str(path)
     manifest = dict(maxtext_version=MAXTEXT_VERSION, stages=stages, device_count=device_count,
                     warmup_steps=raw["warmup_steps"], parameters=parameter_count(model),
