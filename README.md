@@ -12,14 +12,14 @@
 | Block | QK RMSNorm、RMSNorm、SwiGLU、RoPE theta 1,000,000 |
 | Embedding | input/output tied；估算 **385,899,776 parameters** |
 | Optimizer | 原生 Optax Muon；embedding、norm 等使用其 AdamW 分支 |
-| 精度 | BF16 weights/compute/activation/momentum；不保留 FP32 master weights；梯度累積與 loss 保留 FP32 |
+| 精度 | BF16 weights/主要矩陣運算/activation；FP32 logits projection、loss、梯度累積與 optimizer momentum；不保留 FP32 master weights |
 | Remat | `save_qkv_proj`：保留 Q/K/V 投影，其餘 activation 重算 |
 | Attention kernel | Tokamax Splash；Q/K/V 均用 SEQ_MINOR；fused backward、reciprocal、base2 exp |
 | Fusion | fused QKV projection、fused gate/up MLP projection |
 | Loss | `num_vocab_tiling=32`，分塊計算 64K vocab 的 cross entropy |
 | LR | WSO = **Warmup → Stable only**；64 optimizer steps warmup（約 33.6M tokens），之後維持 0.001 |
 
-K 按 1024 解讀；10B token budget 按十進位。GQA head 數、tied embedding、LR 與 warmup 是可修改的起始選擇，並非已由實驗找到的最佳值。BF16 momentum 使用原生 `mu_dtype`；數值敏感部分保留 FP32。
+K 按 1024 解讀；10B token budget 按十進位。GQA head 數、tied embedding、LR 與 warmup 是可修改的起始選擇，並非已由實驗找到的最佳值。`weight_dtype=bfloat16` 保留 BF16 權重；`mu_dtype=float32` 提高 momentum 的精度；`logits_dot_in_fp32=true` 和 `cast_logits_to_fp32=true` 保護輸出投影與 loss。RMSNorm 的統計量與縮放由 MaxText 原生實作使用 FP32。這些不建立另一份 FP32 master weights。
 
 ## Sequence length curriculum
 
@@ -111,7 +111,9 @@ python -m llm5.launch --execute
 
 專案設定全部使用 JSON：`configs/model.json`、`configs/curriculum.json`、`configs/sources.json`、`configs/maxtext-base.json`，以及產生的 stage 和 probe 設定。MaxText 0.2.5 預設設定已轉成專案內的 `maxtext-base.json`；不修改安裝的套件。`llm5.train` 補上 `.json` 設定入口。每個 probe 使用獨立 JSON 文件，明確設定 `"load_full_state_path": ""` 和 `"load_parameters_path": ""`，不透過 CLI 的空值覆寫，以免被解析成 null。Notebook 用 `%run` 在同一 kernel 執行，裝置探測與訓練共用 TPU runtime。單 host Colab 的設定採 `skip_jax_distributed_system=true`、同步 checkpoint，避免 kernel 已持有 TPU 時再啟動另一個 runtime。
 
-寫入 TensorBoard 前檢查指標中的 NaN/Inf，並顯示 step、phase、完整指標名稱與異常值。Loss、梯度 norm 或參數 norm 異常會直接拋出 `FloatingPointError`；其他輔助指標發出具名 warning，不修改或隱藏原始數值。TensorBoard 的泛用 NaN/Inf warning 本身不足以判斷 loss 是否發散。
+寫入 TensorBoard 前檢查指標中的 NaN/Inf，並顯示 step、phase、完整指標名稱與異常值。Loss、梯度 norm 或參數 norm 異常會直接拋出 `FloatingPointError`；其他輔助指標發出具名 warning。TensorBoard 的泛用 NaN/Inf warning 本身不足以判斷 loss 是否發散。
+
+Perplexity 的 FP32 `exp(lm_loss)` 在 lm_loss 超過約 88.7 時會溢位。Host 端以較大範圍重新計算此報告指標，並始終記錄自然對數 `learning/log_perplexity=learning/lm_loss`。超出 TensorBoard FP32 scalar 範圍的 perplexity 不寫入該 scalar，保留 log_perplexity；JSON 在 float64 可表示時仍記錄完整 perplexity，超出 float64 時只保留 log_perplexity。不裁切 loss 或梯度，也不拿零代替異常值。Host 報告使用較大數值範圍，不改變 TPU 的矩陣精度。
 
 安裝 requirements 並進入專案目錄後，直接執行 synthetic batch/GA 測速，不需要先執行其他設定 blocks 或準備訓練資料：
 

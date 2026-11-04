@@ -13,6 +13,10 @@ from llm5.launch import command
 def test_bf16_tokamax_and_batch_accounting():
     model = read_json(ROOT / "configs/model.json")
     assert model["weight_dtype"] == "bfloat16"
+    assert model["mu_dtype"] == "float32"
+    assert model["grad_dtype"] == "float32"
+    assert model["logits_dot_in_fp32"] is True
+    assert model["cast_logits_to_fp32"] is True
     assert model["use_tokamax_splash"] is True
     assert model["fused_qkv"] is True and model["fused_mlp"] is True
     assert [model[f"sa_{x}_layout"] for x in "qkv"] == ["SEQ_MINOR"]*3

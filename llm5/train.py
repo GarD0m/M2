@@ -2,6 +2,41 @@
 from functools import wraps
 from pathlib import Path
 import warnings
+import math
+
+PERPLEXITY_SOURCES = (
+    ("learning/lm_loss", "learning/perplexity", "learning/log_perplexity"),
+    ("eval/avg_loss", "eval/avg_perplexity", "eval/avg_log_perplexity"),
+)
+
+
+def prepare_perplexity_metrics(metrics):
+    scalars = metrics.get("scalar", {})
+    if not any(source in scalars for source, _, _ in PERPLEXITY_SOURCES):
+        return metrics
+    scalars = dict(scalars)
+    for source, perplexity, log_perplexity in PERPLEXITY_SOURCES:
+        if source in scalars:
+            loss = float(scalars[source])
+            scalars[log_perplexity] = loss
+            if math.isfinite(loss):
+                try:
+                    scalars[perplexity] = math.exp(loss)
+                except OverflowError:
+                    scalars[perplexity] = math.inf
+    return {**metrics, "scalar": scalars}
+
+
+def serializable_perplexity_metrics(metrics, float32=False):
+    """Keep log perplexity when the derived exponential exceeds writer range."""
+    scalars = metrics.get("scalar", {})
+    limit = float.fromhex("0x1.fffffep+127") if float32 else float.fromhex("0x1.fffffffffffffp+1023")
+    omit = {p for _, p, lp in PERPLEXITY_SOURCES if p in scalars and lp in scalars
+            and math.isfinite(float(scalars[lp]))
+            and (not math.isfinite(float(scalars[p])) or abs(float(scalars[p])) > limit)}
+    if not omit:
+        return metrics
+    return {**metrics, "scalar": {key: val for key, val in scalars.items() if key not in omit}}
 
 
 def nonfinite_metrics(metrics):
@@ -29,16 +64,20 @@ def install_metric_diagnostics(module=None):
     if module is None:
         from maxtext.common import metric_logger as module
     original = module.MetricLogger.write_metrics
-    if getattr(original, "_llm5_finite_check", False):
+    if getattr(original, "_llm5_finite_check_version", 0) == 2:
         return
+    if getattr(original, "_llm5_finite_check", False):
+        original = original.__wrapped__
 
     @wraps(original)
     def write_metrics(self, metrics, step, metric_type="train"):
-        bad = nonfinite_metrics(metrics or {})
+        metrics = prepare_perplexity_metrics(metrics or {})
+        # Exponential range overflow is represented by the finite log metric.
+        bad = nonfinite_metrics(serializable_perplexity_metrics(metrics))
         if bad:
             detail = "; ".join(f"{key}={value}" for key, value in bad.items())
             message = f"Non-finite metrics at step={step}, phase={metric_type}: {detail}"
-            critical = {"learning/loss", "learning/grad_norm", "learning/raw_grad_norm",
+            critical = {"learning/loss", "learning/lm_loss", "learning/grad_norm", "learning/raw_grad_norm",
                         "learning/param_norm", "eval/avg_loss", "eval/loss"}
             if critical.intersection(bad):
                 raise FloatingPointError(message)
@@ -46,7 +85,19 @@ def install_metric_diagnostics(module=None):
         return original(self, metrics, step, metric_type)
 
     write_metrics._llm5_finite_check = True
+    write_metrics._llm5_finite_check_version = 2
     module.MetricLogger.write_metrics = write_metrics
+    for method_name, use_float32 in (("write_metrics_to_tensorboard", True), ("write_metrics_locally", False)):
+        native = getattr(module.MetricLogger, method_name, None)
+        if native is None or getattr(native, "_llm5_perplexity_range", False):
+            continue
+        def wrap_writer(writer, float32):
+            @wraps(writer)
+            def write(self, metrics, *args, **kwargs):
+                return writer(self, serializable_perplexity_metrics(metrics, float32), *args, **kwargs)
+            write._llm5_perplexity_range = True
+            return write
+        setattr(module.MetricLogger, method_name, wrap_writer(native, use_float32))
 
 
 def install_json_config_support(module=None):
