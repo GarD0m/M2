@@ -14,19 +14,11 @@ os.chdir(REPO)
 print(REPO)
 ```
 
-## 2. Tune with automatic plan preparation
+## 2. Tune directly in this kernel
 
 ```python
-# Assumes requirements.txt is already installed in this Colab runtime.
-# Synthetic data only: no training corpus download is required.
-import subprocess, sys
-subprocess.run([
-    sys.executable, "-m", "llm5.tune", "--prepare-plan",
-    "--manifest", "runs/plan-512k/manifest.json",
-    "--out", "runs/microbatches-512k.json",
-    "--log-dir", "runs/probes-512k",
-    "--steps", "12", "--skip-steps", "4", "--max-micro-tokens", "131072"
-], check=True)
+# Run in the notebook kernel; no training subprocesses or error wrappers.
+%run -m llm5.tune --prepare-plan --manifest runs/plan-512k/manifest.json --out runs/microbatches-512k.json --log-dir runs/probes-512k
 ```
 
 ## 3. Prepare actual training data
@@ -34,26 +26,21 @@ subprocess.run([
 ```python
 # Long-running: ~10B tokens, ~40GB uncompressed int32 plus cache.
 from pathlib import Path
-import json, subprocess, sys
+import json
 manifest = json.loads(Path("runs/plan-512k/manifest.json").read_text())
 if not all((Path("data/packed-512k") / s["name"] / "metadata.json").exists()
            for s in manifest["stages"]):
-    subprocess.run([sys.executable, "-m", "llm5.data", "--out", "data/packed-512k",
-                    "--tokenizer", "models/tokenizer"], check=True)
+    %run -m llm5.data --out data/packed-512k --tokenizer models/tokenizer
 ```
 
 ## 4. Validate data and preview commands
 
 ```python
-import subprocess, sys
-subprocess.run([sys.executable, "-m", "llm5.launch", "--manifest",
-                "runs/plan-512k/manifest.json", "--check-data"], check=True)
+%run -m llm5.launch --manifest runs/plan-512k/manifest.json --check-data
 ```
 
-## 5. Train or resume
+## 5. Train or resume in this kernel
 
 ```python
-import subprocess, sys
-subprocess.run([sys.executable, "-m", "llm5.launch", "--manifest",
-                "runs/plan-512k/manifest.json", "--execute"], check=True)
+%run -m llm5.launch --manifest runs/plan-512k/manifest.json --execute
 ```

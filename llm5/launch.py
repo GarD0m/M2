@@ -5,11 +5,11 @@ import json
 import os
 from pathlib import Path
 import shlex
-import subprocess
 import sys
 
 import pyarrow.parquet as pq
 from llm5.plan import MAXTEXT_VERSION, ROOT, digest, read_json
+from llm5.train import run_training_config
 
 
 def load_manifest(path):
@@ -84,9 +84,8 @@ def main():
     manifest = load_manifest(args.manifest)
     if args.execute:
         os.environ.setdefault("JAX_PLATFORMS", "tpu")
-        count = check_runtime()
-        if count != manifest["device_count"]:
-            raise RuntimeError(f"Regenerate plan with --device-count {count} to keep the global token batch unchanged")
+        # MaxText initializes distributed JAX before its first device query.
+        # Subsequent stages reuse that runtime in this process.
     for s in manifest["stages"]:
         if args.check_data or args.execute:
             check_data(s)
@@ -101,7 +100,7 @@ def main():
             continue
         if cfg["load_full_state_path"] and not epath.Path(cfg["load_full_state_path"]).exists():
             raise FileNotFoundError(f"Previous stage full checkpoint missing: {cfg['load_full_state_path']}")
-        subprocess.run(cmd, check=True)
+        run_training_config(s["config"])
         if not epath.Path(checkpoint_items(cfg, s["end_step"])).exists():
             raise RuntimeError("Training exited without the required final full-state checkpoint")
 

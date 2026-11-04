@@ -37,5 +37,16 @@ def main():
     app.run(train.main)
 
 
+def run_training_config(config_path):
+    """Run MaxText directly in the caller's process; preserve native exceptions."""
+    install_json_config_support()
+    install_fused_qkv_muon_support()
+    from absl import flags
+    from maxtext.trainers.pre_train import train
+    if not flags.FLAGS.is_parsed():
+        flags.FLAGS(["llm5"])
+    return train.main(["llm5.train", str(config_path)])
+
+
 if __name__ == "__main__":
     main()

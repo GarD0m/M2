@@ -76,7 +76,7 @@ def test_tune_prepares_default_plan_and_applies_choice(tmp_path, monkeypatch):
 
 
 def test_probe_json_preserves_empty_checkpoint_strings(tmp_path, monkeypatch):
-    from llm5.tune import prepare_plan, write_probe_config, probe_error
+    from llm5.tune import prepare_plan, write_probe_config
     monkeypatch.chdir(tmp_path)
     manifest = prepare_plan(tmp_path / "plan/manifest.json", 1)
     stage = manifest["stages"][1]
@@ -97,9 +97,6 @@ def test_probe_json_preserves_empty_checkpoint_strings(tmp_path, monkeypatch):
     assert isinstance(loaded.load_full_state_path, str)
     assert loaded.load_full_state_path == ""
     assert loaded.enable_checkpointing is False
-    log = tmp_path / "failure.log"
-    log.write_text("ValidationError: load_full_state_path\n", encoding="utf-8")
-    assert "ValidationError: load_full_state_path" in probe_error(log, 1)
 
 
 def test_json_entrypoint_does_not_use_cli_value_parsing():

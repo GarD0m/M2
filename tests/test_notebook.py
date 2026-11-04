@@ -12,11 +12,14 @@ def test_notebook_blocks_compile_and_are_unexecuted():
     for c in cells:
         assert c["outputs"] == [] and c["execution_count"] is None
         source = "".join(c["source"])
-        python = "\n".join("pass" if line.startswith("%pip ") else line for line in source.splitlines())
+        python = "\n".join(line[:len(line)-len(line.lstrip())] + "pass"
+                           if line.lstrip().startswith(("%pip ", "%run ")) else line
+                           for line in source.splitlines())
         compile(python, c["id"], "exec")
     code = "\n".join("".join(c["source"]) for c in cells)
     assert "%pip install" not in code and ".venv" not in code
     assert "--prepare-plan" in code
+    assert "%run -m llm5.tune" in code and "%run -m llm5.launch" in code
 
 
 def test_bundled_tokenizer_matches_metadata():

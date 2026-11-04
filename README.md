@@ -81,7 +81,7 @@ python -m llm5.plan --output-root gs://YOUR_BUCKET/llm5 --run-prefix experiment-
 python -m llm5.launch --execute
 ```
 
-`tune` 對每階段有效 sequence batch 的所有 2 次方 microbatch 候選執行獨立程序，GA 隨之調整，維持每次更新 512K tokens，預設搜尋 microbatch 容量不超過 128K tokens 的候選。預設每個候選測 12 步，捨棄前 4 步，依後續 step time 中位數選最快的候選；不以最大 microbatch 代替速度測量。OOM 記錄後繼續，其餘錯誤直接停止。結果輸出 `runs/microbatches.json` 和完整 timing report。這只搜尋 batch/GA，沒有宣稱已找到所有 kernel tiling 的全域最佳值。**目前未在 TPU 上執行，因此不保證起始 microbatch 已能放入記憶體，也沒有訓練速度或品質結果。** Google 的 v6e 文件列出每顆 32GB HBM：[官方規格](https://docs.cloud.google.com/tpu/docs/v6e)。
+`tune` 在目前程序直接呼叫 MaxText，依序測各階段的 2 次方 microbatch 候選，不啟動訓練子程序。GA 隨之調整，維持每次更新 512K tokens，預設搜尋每裝置 microbatch 容量不超過 128K tokens 的候選。每個候選測 12 步，捨棄前 4 步，依後續 step time 中位數選最快的候選。成功後清理 JAX 編譯快取及可回收物件，再測下一個候選。所有錯誤（包括 OOM）直接顯示原始 traceback 並停止，不包裝或跳過。結果輸出 `runs/microbatches.json` 和完整 timing report。**目前未在 TPU 上執行，因此不保證起始 microbatch 已能放入記憶體，也沒有訓練速度或品質結果。** Google 的 v6e 文件列出每顆 32GB HBM：[官方規格](https://docs.cloud.google.com/tpu/docs/v6e)。
 
 以起始 microbatch 的 32K tokens 計算：BF16 權重約 0.719 GiB，比 FP32 權重減少約 0.719 GiB；FP32 gradient buffer 約 1.438 GiB；五層 QKV checkpoint 約 1.25 GiB；layer inputs 約 0.625 GiB；單個 FP32 logits tile 約 0.25 GiB。這些是個別張量大小，**不是總 HBM 預測**：optimizer states、Muon Newton–Schulz workspace、重算 activation、XLA 暫存與存活時間仍需實機 profiling。每階段的計算結果包含在 plan manifest。
 
@@ -109,12 +109,12 @@ python -m llm5.launch --execute
 
 `requirements.txt` 是專案維護的 Colab TPU 安裝清單，參照使用者提供的 `pip-freeze.tpu.txt`，保留 JAX/JAXlib 0.11.2、libtpu 0.0.50 等核心版本，並使用符合 MaxText NNX 需求的 Flax。原始 freeze 只作參考，不直接重裝 Colab 本機套件路徑。MaxText 不使用 `[tpu]` extra，因為其 0.2.5 套件宣告包含 SymPy/mpmath 衝突；本專案明列 runtime 依賴，採用相容的 SymPy 1.14.0／mpmath 1.3.0。已完成 Linux Python 3.13 的依賴解析，尚未在 Colab TPU 執行完整安裝及訓練。
 
-專案設定全部使用 JSON：`configs/model.json`、`configs/curriculum.json`、`configs/sources.json`、`configs/maxtext-base.json`，以及產生的 stage 和 probe 設定。MaxText 0.2.5 預設設定已轉成專案內的 `maxtext-base.json`；不修改安裝的套件。`llm5.train` 補上 `.json` 設定入口。每個 probe 使用獨立 JSON 文件，明確設定 `"load_full_state_path": ""` 和 `"load_parameters_path": ""`，不透過 CLI 的空值覆寫，以免被解析成 null。失敗時 tune 直接顯示子程序 log 最後 80 行。
+專案設定全部使用 JSON：`configs/model.json`、`configs/curriculum.json`、`configs/sources.json`、`configs/maxtext-base.json`，以及產生的 stage 和 probe 設定。MaxText 0.2.5 預設設定已轉成專案內的 `maxtext-base.json`；不修改安裝的套件。`llm5.train` 補上 `.json` 設定入口。每個 probe 使用獨立 JSON 文件，明確設定 `"load_full_state_path": ""` 和 `"load_parameters_path": ""`，不透過 CLI 的空值覆寫，以免被解析成 null。Notebook 用 `%run` 在同一 kernel 執行，裝置探測與訓練共用 TPU runtime。單 host Colab 的設定採 `skip_jax_distributed_system=true`、同步 checkpoint，避免 kernel 已持有 TPU 時再啟動另一個 runtime。
 
 安裝 requirements 並進入專案目錄後，直接執行 synthetic batch/GA 測速，不需要先執行其他設定 blocks 或準備訓練資料：
 
 ```bash
-python -m llm5.tune --prepare-plan --manifest runs/plan-512k/manifest.json --out runs/microbatches-512k.json --log-dir runs/probes-512k --steps 12 --skip-steps 4 --max-micro-tokens 131072
+%run -m llm5.tune --prepare-plan --manifest runs/plan-512k/manifest.json --out runs/microbatches-512k.json --log-dir runs/probes-512k --steps 12 --skip-steps 4 --max-micro-tokens 131072
 ```
 
 官方框架參考：[MaxText 0.2.5](https://pypi.org/project/maxtext/0.2.5/)、[安裝流程](https://maxtext.readthedocs.io/en/latest/install_maxtext.html)。

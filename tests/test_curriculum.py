@@ -10,7 +10,6 @@ import pytest
 from llm5.plan import ROOT, curriculum, generate, read_json
 from llm5.data import TokenStream, domain_order, is_eval, write_shards
 from llm5.tokenizer import build_bpe
-from llm5.tune import is_oom
 from llm5.launch import check_data, load_manifest
 
 
@@ -98,11 +97,6 @@ def test_holdout_deterministic():
     results = [is_eval(f"doc {i}") for i in range(10000)]
     assert 10 < sum(results) < 100
     assert results == [is_eval(f"doc {i}") for i in range(10000)]
-
-
-def test_oom_only_retry():
-    assert is_oom("RESOURCE_EXHAUSTED: failed allocation")
-    assert not is_oom("TypeError: invalid optimizer config")
 
 
 UPSTREAM = ROOT / "upstream/maxtext/src/maxtext"

@@ -1,26 +1,21 @@
 """Probe microbatch sizes on a single TPU; preserve each stage's effective batch."""
 import argparse
+import gc
 import json
 import os
 from pathlib import Path
-import subprocess
 import time
 import math
 from statistics import median
 
-from llm5.launch import check_runtime, command, load_manifest
+from llm5.launch import check_runtime, load_manifest
 from llm5.plan import generate, read_json
+from llm5.train import run_training_config
 
 
 def prepare_plan(manifest_path, device_count, microbatches=None):
     return generate(Path(manifest_path).parent, "data/packed-512k", "models/tokenizer",
                     "runs/checkpoints", "m2-bf16-512k-v1", microbatches, device_count)
-
-
-def is_oom(log):
-    text = log.lower()
-    return any(s in text for s in ("resource_exhausted", "out of memory", "ran out of memory",
-                                   "failed to allocate", "cannot allocate memory"))
 
 
 def candidates(effective_batch, length=1024, max_micro_tokens=131072, device_count=1):
@@ -54,9 +49,11 @@ def write_probe_config(stage, path, micro, device_count, steps, log_dir, probe_i
     Path(path).write_text(json.dumps(config, indent=2), encoding="utf-8")
 
 
-def probe_error(log_path, returncode):
-    tail = "\n".join(Path(log_path).read_text(encoding="utf-8", errors="replace").splitlines()[-80:])
-    return f"Probe exited with code {returncode}. Log: {log_path}\n{tail}"
+def release_probe_resources():
+    import jax
+    gc.collect()
+    jax.clear_caches()
+    gc.collect()
 
 
 def main():
@@ -90,17 +87,13 @@ def main():
             metrics_path = log_dir / f"{probe_id}.jsonl"
             config_path = log_dir / f"{probe_id}.json"
             write_probe_config(s, config_path, micro, device_count, args.steps, log_dir, probe_id, metrics_path)
-            log_path = log_dir / f"{s['name']}-micro{micro}.log"
             print(f"Probing {s['name']} micro={micro} GA={s['effective_batch'] // micro}", flush=True)
-            with log_path.open("w", encoding="utf-8") as log:
-                result = subprocess.run(command(config_path), stdout=log, stderr=subprocess.STDOUT)
-            if result.returncode == 0:
-                seconds = steady_step_seconds(metrics_path, args.skip_steps)
-                results.append(dict(microbatch=micro, accumulation=s["effective_batch"]//micro,
-                                    median_step_seconds=seconds, loss_tokens_per_second=s["tokens_per_step"]/seconds))
-                print(f"Median step: {seconds:.4f}s; {s['tokens_per_step']/seconds:,.0f} loss tokens/s", flush=True)
-            elif not is_oom(log_path.read_text(encoding="utf-8", errors="replace")):
-                raise RuntimeError(probe_error(log_path, result.returncode))
+            run_training_config(config_path)
+            seconds = steady_step_seconds(metrics_path, args.skip_steps)
+            results.append(dict(microbatch=micro, accumulation=s["effective_batch"]//micro,
+                                median_step_seconds=seconds, loss_tokens_per_second=s["tokens_per_step"]/seconds))
+            print(f"Median step: {seconds:.4f}s; {s['tokens_per_step']/seconds:,.0f} loss tokens/s", flush=True)
+            release_probe_resources()
         if not results:
             raise RuntimeError(f"No fitting microbatch for {s['name']}; inspect {log_dir}.")
         best = min(results, key=lambda r: r["median_step_seconds"])
