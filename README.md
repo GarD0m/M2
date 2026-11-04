@@ -111,6 +111,8 @@ python -m llm5.launch --execute
 
 專案設定全部使用 JSON：`configs/model.json`、`configs/curriculum.json`、`configs/sources.json`、`configs/maxtext-base.json`，以及產生的 stage 和 probe 設定。MaxText 0.2.5 預設設定已轉成專案內的 `maxtext-base.json`；不修改安裝的套件。`llm5.train` 補上 `.json` 設定入口。每個 probe 使用獨立 JSON 文件，明確設定 `"load_full_state_path": ""` 和 `"load_parameters_path": ""`，不透過 CLI 的空值覆寫，以免被解析成 null。Notebook 用 `%run` 在同一 kernel 執行，裝置探測與訓練共用 TPU runtime。單 host Colab 的設定採 `skip_jax_distributed_system=true`、同步 checkpoint，避免 kernel 已持有 TPU 時再啟動另一個 runtime。
 
+寫入 TensorBoard 前檢查指標中的 NaN/Inf，並顯示 step、phase、完整指標名稱與異常值。Loss、梯度 norm 或參數 norm 異常會直接拋出 `FloatingPointError`；其他輔助指標發出具名 warning，不修改或隱藏原始數值。TensorBoard 的泛用 NaN/Inf warning 本身不足以判斷 loss 是否發散。
+
 安裝 requirements 並進入專案目錄後，直接執行 synthetic batch/GA 測速，不需要先執行其他設定 blocks 或準備訓練資料：
 
 ```bash
