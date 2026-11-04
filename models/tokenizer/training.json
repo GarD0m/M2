@@ -1,0 +1,16 @@
+{
+  "vocab_size": 65536,
+  "sources_sha256": "adec30400b3bb7a63ae69172176b227f629eb14dee14f43183e1c3411a399ec4",
+  "tokenizer_sha256": "9ecc2507a8b613423c4247ba2d411fe29c3051f06edab450e2c227e86d2052b2",
+  "max_documents": 100000,
+  "max_characters": 100000000,
+  "seed": 42,
+  "sample_domain_weights": [
+    0.7,
+    0.1,
+    0.2
+  ],
+  "algorithm": "ByteLevel BPE",
+  "sampling_mode": "sequential-no-shuffle",
+  "sample_file": "tokenizer-hf-sample.jsonl"
+}
