@@ -97,6 +97,8 @@ def generate(out, tokenizer, output_root, run_prefix, device_count=1):
             use_gmm_v2_heuristic_tiling=True,
             moe_use_direct_token_gather=True,
         )
+        if model["decoder_block"] == "deepseek4":
+            cfg.update(use_csa_streamindex_kernel=True, csa_qk_head_chunk_size=4)
         cfg.update(model)
         cfg["base_config"] = str(ROOT / "configs/maxtext-base.json")
         cfg.update(
