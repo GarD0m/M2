@@ -10,6 +10,12 @@ import os
 from tqdm.auto import tqdm
 
 _TRAINING_PROGRESS = None
+TENSORBOARD_SCALARS = {
+    "learning/loss",
+    "learning/current_learning_rate",
+    "eval/avg_loss",
+    "perf/per_device_tokens_per_sec",
+}
 
 
 def configure_tpu():
@@ -141,7 +147,7 @@ def install_metric_diagnostics(module=None):
     if module is None:
         from maxtext.common import metric_logger as module
     original = module.MetricLogger.write_metrics
-    if getattr(original, "_llm5_finite_check_version", 0) == 3:
+    if getattr(original, "_llm5_finite_check_version", 0) == 4:
         return
     if getattr(original, "_llm5_finite_check", False):
         original = original.__wrapped__
@@ -164,7 +170,7 @@ def install_metric_diagnostics(module=None):
         return result
 
     write_metrics._llm5_finite_check = True
-    write_metrics._llm5_finite_check_version = 3
+    write_metrics._llm5_finite_check_version = 4
     module.MetricLogger.write_metrics = write_metrics
     for method_name, use_float32 in (("write_metrics_to_tensorboard", True), ("write_metrics_locally", False)):
         native = getattr(module.MetricLogger, method_name, None)
@@ -177,6 +183,30 @@ def install_metric_diagnostics(module=None):
             write._llm5_perplexity_range = True
             return write
         setattr(module.MetricLogger, method_name, wrap_writer(native, use_float32))
+
+    tensorboard = module.MetricLogger.write_metrics_to_tensorboard
+
+    @wraps(tensorboard)
+    def write_tensorboard(self, metrics, step, metric_type):
+        if metric_type == "running_eval":
+            return
+        scalars = {key: value for key, value in metrics.get("scalar", {}).items()
+                   if key in TENSORBOARD_SCALARS}
+        return tensorboard(self, {"scalar": scalars}, step, metric_type)
+
+    def record_setup(self, params):
+        # Throughput reporting still needs these values in memory.
+        self.metadata[module.MetadataKey.PER_DEVICE_TFLOPS], _, _ = (
+            module.maxtext_utils.calculate_tflops_training_per_device(self.config)
+        )
+        self.metadata[module.MetadataKey.PER_DEVICE_TOKENS] = (
+            module.maxtext_utils.calculate_tokens_training_per_device(self.config)
+        )
+        count = module.max_utils.calculate_num_params_from_pytree(params)
+        module.max_logging.log(f"number parameters: {count / 1e9:.3f} billion")
+
+    module.MetricLogger.write_metrics_to_tensorboard = write_tensorboard
+    module.MetricLogger.write_setup_info_to_tensorboard = record_setup
 
 
 def install_json_config_support(module=None):
@@ -306,23 +336,19 @@ def install_mhc_low_memory():
     mhc.RMSNorm = MhcRMSNorm
 
 
-def install_deepseek4_loop():
+def install_deepseek4_support():
     from types import SimpleNamespace
     from flax import nnx
-    from maxtext.common.common_types import MODEL_MODE_TRAIN
     from maxtext.layers import moe, nnx_decoders
     from maxtext.models import deepseek4
 
     install_mhc_low_memory()
     decoder = nnx_decoders.NNXDecoder
     native = decoder._apply_deepseek4_scanned_blocks
-    if getattr(native, "_llm5_loop3_remat", False):
+    if getattr(native, "_llm5_loop3_remat", False) or getattr(native, "_llm5_loop3", False):
+        decoder._apply_deepseek4_scanned_blocks = native.__wrapped__
+    if getattr(deepseek4.moe.RoutedAndSharedMoE, "_llm5_routed_only", False):
         return
-    if getattr(native, "_llm5_loop3", False):
-        native = native.__wrapped__
-
-    # Keep the native per-block remat and add a boundary across each shared pass.
-    remat_pass = nnx.remat(native, static_argnums=(4, 5), prevent_cse=True)
 
     class RoutedOnly(nnx.Module):
         def __init__(self, config, **kwargs):
@@ -343,21 +369,8 @@ def install_deepseek4_loop():
         return moe.RoutedAndSharedMoE(config, **kwargs)
 
     # Only V4 uses this factory. Keep the native expert parameter path for Muon.
+    create_mlp._llm5_routed_only = True
     deepseek4.moe = SimpleNamespace(RoutedAndSharedMoE=create_mlp)
-
-    @wraps(native)
-    def apply(self, y, decoder_segment_ids, decoder_positions, deterministic, model_mode, *args, **kwargs):
-        if self.config.num_decoder_layers != 2 or self.config.first_num_hash_layers != 0:
-            raise ValueError("The shared loop requires one HCA+CSA scan block and no prefix layers")
-        if model_mode != MODEL_MODE_TRAIN:
-            raise ValueError("The shared decoder loop currently supports training and eval in train mode")
-        # Recompute one pass at a time in backward, with the same shared weights.
-        for _ in range(3):
-            y = remat_pass(self, y, decoder_segment_ids, decoder_positions, deterministic, model_mode, *args, **kwargs)
-        return y
-
-    apply._llm5_loop3_remat = True
-    decoder._apply_deepseek4_scanned_blocks = apply
 
 
 def install_aligned_logits_tiles(trainer):
@@ -395,7 +408,7 @@ def main():
     install_json_config_support()
     install_fused_qkv_muon_support()
     install_metric_diagnostics()
-    install_deepseek4_loop()
+    install_deepseek4_support()
     from absl import app
     from maxtext.trainers.pre_train import train
     install_aligned_logits_tiles(train)
@@ -419,7 +432,7 @@ def run_training_config(config_path, start_step=0, checkpoint_hub=None):
             install_json_config_support()
             install_fused_qkv_muon_support()
             install_metric_diagnostics()
-            install_deepseek4_loop()
+            install_deepseek4_support()
             from absl import flags
             from maxtext.trainers.pre_train import train
             install_aligned_logits_tiles(train)

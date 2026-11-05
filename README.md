@@ -1,6 +1,6 @@
 # M2
 
-一個 DeepSeek V4 HCA＋CSA decoder block（兩個 layers），使用原生 scan 並共用同一組權重跑三次。V=65,536、D=2,048。每層有 16 個 routed experts，每 token 選 3 個，每個 expert 寬度 2,048。總參數約 5.46 億，精確值由 MaxText 在初始化時統計。
+一個 DeepSeek V4 HCA＋CSA decoder block（兩個 layers），使用原生 scan 跑一輪。V=65,536、D=2,048。每層有 16 個 routed experts，每 token 選 3 個，每個 expert 寬度 2,048。總參數約 5.46 億，精確值由 MaxText 在初始化時統計。
 
 Muon、Tokamax、SEQ_MINOR、fused MLP、save_qkv_proj remat。DeepSeek V4 使用原生 compressed Q/KV projections，因此關閉 Qwen3 的 fused QKV。BF16 權重與主要矩陣運算；logits、loss、梯度累積及 momentum 使用 FP32，沒有 FP32 master weights。`model_name=deepseek4-tiny` 選用 MaxText 的 V4 routing 路徑，`override_model_config=true` 以本專案 JSON 覆寫尺寸，不會建立官方 tiny preset 的 43 層模型。
 
@@ -25,7 +25,7 @@ os.environ["JAX_PLATFORMS"] = "tpu"
 os.environ["JAX_COMPILATION_CACHE_DIR"] = "/content/jax-cache"
 ```
 
-DeepSeek V4 的啟動計畫會將保存的 BF16 Q/KV 和 optimizer state 移到 host RAM，並將 CSA teacher 每組縮到 1 個 head。Logits 最多分成 128 塊，較小的驗證 batch 會減少塊數以維持 128 tokens 對齊。mHC RMSNorm 和 HyperHead 的大型運算元使用 BF16，歸約保留 FP32。Host 傳輸與分塊可能增加每步時間。
+訓練的 BF16 Q/KV、參數與 optimizer state 放在 TPU HBM。CSA teacher 每組處理 1 個 head。Logits 最多分成 128 塊，較小的驗證 batch 會減少塊數以維持 128 tokens 對齊。mHC RMSNorm 和 HyperHead 的大型運算元使用 BF16，歸約保留 FP32。
 
 開始／續訓：
 
@@ -63,7 +63,9 @@ TensorBoard logdir 固定為 `<output-root>/<run-name>/tensorboard`。每個 che
 %tensorboard --logdir /content/M2/runs/checkpoints
 ```
 
-DeepSeek V4 預設 run prefix 是 `m2-deepseek4-loop3-16e-512k-v1`。Hub 在 `runs/<run-prefix>/latest.json` 保存獨立續訓索引，同時更新根目錄 `latest.json`。16-expert 架構從頭訓練，沿用各自的 checkpoint 索引。
+TensorBoard 只寫入訓練 loss、整次驗證的平均 loss、學習率和每裝置 tokens/s。
+
+DeepSeek V4 預設 run prefix 是 `m2-deepseek4-1pass-16e-512k-v1`。Hub 在 `runs/<run-prefix>/latest.json` 保存獨立續訓索引，同時更新根目錄 `latest.json`。單輪訓練使用自己的 checkpoint 索引。
 
 下次執行相同命令，會自動讀取 Hub 最新 checkpoint，驗證 model／curriculum／tokenizer／輸入格式是否匹配，下載並恢復完整訓練狀態；若本機有更新的 checkpoint 則優先使用本機。已完成階段不會重新訓練；切換長度階段沿用串流 cursor 與未使用的 tokens。新 Colab runtime 直接恢復 streaming，不需要重建訓練資料。舊版預先打包資料的 iterator 不相容，會直接報錯，避免默默重置資料位置。這些是 MaxText 訓練 checkpoint，並非直接供 `AutoModel.from_pretrained` 使用的 Transformers 權重。
 
