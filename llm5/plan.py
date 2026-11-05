@@ -102,8 +102,8 @@ def generate(out, tokenizer, output_root, run_prefix, device_count=1):
             cfg.update(
                 use_csa_streamindex_kernel=True,
                 csa_qk_head_chunk_size=1,
-                remat_policy="qkv_proj_offloaded",
-                optimizer_memory_host_offload=True,
+                remat_policy="save_qkv_proj",
+                optimizer_memory_host_offload=False,
                 parameter_memory_host_offload=False,
                 num_vocab_tiling=128,
             )
