@@ -154,12 +154,61 @@ def install_fused_qkv_muon_support(module=None):
         module.ATTENTION_QKV_NAMES += ("qkv_proj",)
 
 
+def install_deepseek4_loop():
+    from types import SimpleNamespace
+    from flax import nnx
+    from maxtext.common.common_types import MODEL_MODE_TRAIN
+    from maxtext.layers import moe, nnx_decoders
+    from maxtext.models import deepseek4
+
+    decoder = nnx_decoders.NNXDecoder
+    native = decoder._apply_deepseek4_scanned_blocks
+    if getattr(native, "_llm5_loop3", False):
+        return
+
+    class RoutedOnly(nnx.Module):
+        def __init__(self, config, **kwargs):
+            self.MoeBlock_0 = moe.RoutedMoE(
+                config=config,
+                num_experts=config.num_experts,
+                num_experts_per_tok=config.num_experts_per_tok,
+                intermediate_dim=config.moe_mlp_dim,
+                **kwargs,
+            )
+
+        def __call__(self, inputs, input_ids=None):
+            return self.MoeBlock_0(inputs=inputs, input_ids=input_ids)
+
+    def create_mlp(config, **kwargs):
+        if config.shared_experts == 0:
+            return RoutedOnly(config, **kwargs)
+        return moe.RoutedAndSharedMoE(config, **kwargs)
+
+    # Only V4 uses this factory. Keep the native expert parameter path for Muon.
+    deepseek4.moe = SimpleNamespace(RoutedAndSharedMoE=create_mlp)
+
+    @wraps(native)
+    def apply(self, y, decoder_segment_ids, decoder_positions, deterministic, model_mode, *args, **kwargs):
+        if self.config.num_decoder_layers != 2 or self.config.first_num_hash_layers != 0:
+            raise ValueError("The shared loop requires one HCA+CSA scan block and no prefix layers")
+        if model_mode != MODEL_MODE_TRAIN:
+            raise ValueError("The shared decoder loop currently supports training and eval in train mode")
+        # Each call runs the native scan with the same two layer parameter sets.
+        for _ in range(3):
+            y = native(self, y, decoder_segment_ids, decoder_positions, deterministic, model_mode, *args, **kwargs)
+        return y
+
+    apply._llm5_loop3 = True
+    decoder._apply_deepseek4_scanned_blocks = apply
+
+
 def main():
     from llm5.streaming import install_streaming_input
     install_streaming_input()
     install_json_config_support()
     install_fused_qkv_muon_support()
     install_metric_diagnostics()
+    install_deepseek4_loop()
     from absl import app
     from maxtext.trainers.pre_train import train
     app.run(train.main)
@@ -179,6 +228,7 @@ def run_training_config(config_path, start_step=0, checkpoint_hub=None):
             install_json_config_support()
             install_fused_qkv_muon_support()
             install_metric_diagnostics()
+            install_deepseek4_loop()
             from absl import flags
             from maxtext.trainers.pre_train import train
             if not flags.FLAGS.is_parsed():

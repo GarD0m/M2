@@ -1,6 +1,6 @@
 # M2
 
-一個原生 DeepSeek V4 HCA＋CSA decoder block（兩個 layers），啟用 scan；壓縮比例 `[128, 4]`，沒有額外 prefix layers。V=65,536、D=2,048；8 個 routed experts、top-2，加 1 個 shared expert，各寬度 2,048，每 token 啟用寬度共 6,144。mHC expansion=4，16 個 query heads、1 個共享 KV head、head_dim=128，Q LoRA rank=512。
+一個 DeepSeek V4 HCA＋CSA decoder block（兩個 layers），使用原生 scan 並共用同一組權重跑三次。V=65,536、D=2,048。每層有 32 個 routed experts，每 token 選 6 個，每個 expert 寬度 1,024。總參數約 5.46 億，精確值由 MaxText 在初始化時統計。
 
 Muon、Tokamax、SEQ_MINOR、fused MLP、save_qkv_proj remat。DeepSeek V4 使用原生 compressed Q/KV projections，因此關閉 Qwen3 的 fused QKV。BF16 權重與主要矩陣運算；logits、loss、梯度累積及 momentum 使用 FP32，沒有 FP32 master weights。`model_name=deepseek4-tiny` 選用 MaxText 的 V4 routing 路徑，`override_model_config=true` 以本專案 JSON 覆寫尺寸，不會建立官方 tiny preset 的 43 層模型。
 
@@ -61,7 +61,7 @@ TensorBoard logdir 固定為 `<output-root>/<run-name>/tensorboard`。每個 che
 %tensorboard --logdir /content/M2/runs/checkpoints
 ```
 
-DeepSeek V4 預設 run prefix 是 `m2-deepseek4-1block-512k-v1`；Hub 在 `runs/<run-prefix>/latest.json` 保存獨立續訓索引，同時更新根目錄 `latest.json`。新架構從頭訓練，保留舊 Qwen3 的 checkpoint；兩者權重不相容。
+DeepSeek V4 預設 run prefix 是 `m2-deepseek4-loop3-32e-512k-v1`；Hub 在 `runs/<run-prefix>/latest.json` 保存獨立續訓索引，同時更新根目錄 `latest.json`。新架構從頭訓練，保留舊 Qwen3 的 checkpoint；兩者權重不相容。
 
 下次執行相同命令，會自動讀取 Hub 最新 checkpoint，驗證 model／curriculum／tokenizer／輸入格式是否匹配，下載並恢復完整訓練狀態；若本機有更新的 checkpoint 則優先使用本機。已完成階段不會重新訓練；切換長度階段沿用串流 cursor 與未使用的 tokens。新 Colab runtime 直接恢復 streaming，不需要重建訓練資料。舊版預先打包資料的 iterator 不相容，會直接報錯，避免默默重置資料位置。這些是 MaxText 訓練 checkpoint，並非直接供 `AutoModel.from_pretrained` 使用的 Transformers 權重。
 
