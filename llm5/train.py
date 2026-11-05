@@ -227,6 +227,63 @@ def install_fused_qkv_muon_support(module=None):
         module.ATTENTION_QKV_NAMES += ("qkv_proj",)
 
 
+def install_mhc_token_tiling():
+    import jax
+    import jax.numpy as jnp
+    from maxtext.layers import mhc
+
+    native_head = mhc.DeepSeek4HyperHead.__call__
+    if getattr(native_head, "_llm5_token_tiling", False):
+        return
+
+    def apply_tiles(function, inputs):
+        batch, length, *features = inputs.shape
+        tile = 64
+        if length <= tile or length % tile:
+            return function(inputs)
+        chunks = inputs.reshape(batch, length // tile, tile, *features).swapaxes(0, 1)
+        # Recompute each tile in backward instead of stacking its FP32 activations.
+        outputs = jax.lax.map(jax.checkpoint(function, prevent_cse=False), chunks)
+        return outputs.swapaxes(0, 1).reshape(batch, length, *outputs.shape[3:])
+
+    @wraps(native_head)
+    def hyper_head(self, inputs):
+        if self.dtype != jnp.bfloat16:
+            return native_head(self, inputs)
+
+        def collapse(chunk):
+            batch, length, streams, width = chunk.shape
+            chunk = chunk.astype(jnp.bfloat16)
+            flat = chunk.reshape(batch, length, streams * width)
+            precision = jax.lax.Precision(self.config.matmul_precision)
+            variance = jnp.mean(jnp.square(flat.astype(jnp.float32)), axis=-1)
+            weights = jnp.asarray(self.hc_fn[...], jnp.bfloat16)
+            mixes = jnp.einsum("bsd,dk->bsk", flat, weights, precision=precision,
+                              preferred_element_type=jnp.float32)
+            # Apply the scalar RMS correction after projection so the large operand stays BF16.
+            mixes = mixes * jax.lax.rsqrt(variance[..., None] + self.eps)
+            scale = jnp.asarray(self.hc_scale[...], jnp.float32)
+            bias = jnp.asarray(self.hc_base[...], jnp.float32)
+            gates = (jax.nn.sigmoid(mixes * scale + bias) + self.eps).astype(jnp.bfloat16)
+            output = jnp.einsum("bsk,bskd->bsd", gates, chunk, precision=precision,
+                               preferred_element_type=jnp.float32)
+            return output.astype(self.dtype)
+
+        return apply_tiles(collapse, inputs)
+
+    class MhcRMSNorm(mhc.RMSNorm):
+        def __call__(self, inputs, out_sharding=None):
+            normalize = super().__call__
+            if out_sharding is not None:
+                return normalize(inputs, out_sharding)
+            return apply_tiles(normalize, inputs)
+
+    hyper_head._llm5_token_tiling = True
+    mhc.DeepSeek4HyperHead.__call__ = hyper_head
+    # This alias is used only for mHC's per-token stream normalization.
+    mhc.RMSNorm = MhcRMSNorm
+
+
 def install_deepseek4_loop():
     from types import SimpleNamespace
     from flax import nnx
@@ -234,6 +291,7 @@ def install_deepseek4_loop():
     from maxtext.layers import moe, nnx_decoders
     from maxtext.models import deepseek4
 
+    install_mhc_token_tiling()
     decoder = nnx_decoders.NNXDecoder
     native = decoder._apply_deepseek4_scanned_blocks
     if getattr(native, "_llm5_loop3", False):
