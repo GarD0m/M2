@@ -355,6 +355,24 @@ def install_deepseek4_loop():
     decoder._apply_deepseek4_scanned_blocks = apply
 
 
+def install_aligned_logits_tiles(trainer):
+    native = trainer.vocab_tiling_nnx_loss
+    if getattr(native, "_llm5_aligned_logits_tiles", False):
+        return
+
+    @wraps(native)
+    def loss(model, hidden_states, data, config, is_train):
+        tokens = math.prod(hidden_states.shape[:-1])
+        if tokens % 128 == 0:
+            tiles = math.gcd(config.num_vocab_tiling, tokens // 128)
+            if tiles != config.num_vocab_tiling:
+                config = config.model_copy(update={"num_vocab_tiling": tiles})
+        return native(model, hidden_states, data, config, is_train)
+
+    loss._llm5_aligned_logits_tiles = True
+    trainer.vocab_tiling_nnx_loss = loss
+
+
 def main():
     configure_tpu()
     load_maxtext_conversion_configs()
@@ -367,6 +385,7 @@ def main():
     install_deepseek4_loop()
     from absl import app
     from maxtext.trainers.pre_train import train
+    install_aligned_logits_tiles(train)
     app.run(train.main)
 
 
@@ -390,6 +409,7 @@ def run_training_config(config_path, start_step=0, checkpoint_hub=None):
             install_deepseek4_loop()
             from absl import flags
             from maxtext.trainers.pre_train import train
+            install_aligned_logits_tiles(train)
             if not flags.FLAGS.is_parsed():
                 flags.FLAGS(["llm5"])
             with checkpoint_hub.capture() if checkpoint_hub is not None else nullcontext():

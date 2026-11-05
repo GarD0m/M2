@@ -104,7 +104,7 @@ def generate(out, tokenizer, output_root, run_prefix, device_count=1):
                 csa_qk_head_chunk_size=1,
                 remat_policy="qkv_proj_offloaded",
                 optimizer_memory_host_offload=True,
-                num_vocab_tiling=256,
+                num_vocab_tiling=128,
             )
         s["memory_components"] = memory_components(cfg, s)
         cfg["base_config"] = str(ROOT / "configs/maxtext-base.json")
