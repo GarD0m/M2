@@ -316,8 +316,13 @@ def install_deepseek4_loop():
     install_mhc_low_memory()
     decoder = nnx_decoders.NNXDecoder
     native = decoder._apply_deepseek4_scanned_blocks
-    if getattr(native, "_llm5_loop3", False):
+    if getattr(native, "_llm5_loop3_remat", False):
         return
+    if getattr(native, "_llm5_loop3", False):
+        native = native.__wrapped__
+
+    # Keep the native per-block remat and add a boundary across each shared pass.
+    remat_pass = nnx.remat(native, static_argnums=(4, 5), prevent_cse=True)
 
     class RoutedOnly(nnx.Module):
         def __init__(self, config, **kwargs):
@@ -346,12 +351,12 @@ def install_deepseek4_loop():
             raise ValueError("The shared loop requires one HCA+CSA scan block and no prefix layers")
         if model_mode != MODEL_MODE_TRAIN:
             raise ValueError("The shared decoder loop currently supports training and eval in train mode")
-        # Each call runs the native scan with the same two layer parameter sets.
+        # Recompute one pass at a time in backward, with the same shared weights.
         for _ in range(3):
-            y = native(self, y, decoder_segment_ids, decoder_positions, deterministic, model_mode, *args, **kwargs)
+            y = remat_pass(self, y, decoder_segment_ids, decoder_positions, deterministic, model_mode, *args, **kwargs)
         return y
 
-    apply._llm5_loop3 = True
+    apply._llm5_loop3_remat = True
     decoder._apply_deepseek4_scanned_blocks = apply
 
 
