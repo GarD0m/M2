@@ -230,8 +230,10 @@ def install_fused_qkv_muon_support(module=None):
 def install_mhc_hyper_head():
     import jax
     import jax.numpy as jnp
-    from maxtext.layers import mhc
+    from maxtext.layers import mhc, normalizations
 
+    # Clear the tiled RMSNorm alias left by an older run in the same kernel.
+    mhc.RMSNorm = normalizations.RMSNorm
     native_head = mhc.DeepSeek4HyperHead.__call__
     if getattr(native_head, "_llm5_token_tiling", False):
         return
