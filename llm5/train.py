@@ -5,10 +5,22 @@ from contextlib import nullcontext
 import warnings
 import math
 import json
+import logging
 import os
 from tqdm.auto import tqdm
 
 _TRAINING_PROGRESS = None
+
+
+def keep_transformers_config_log(record):
+    message = record.getMessage()
+    return not (
+        record.levelno == logging.WARNING
+        and message.startswith((
+            "DeepseekV32Config got `key=rope_scaling` in kwargs but hasn't set it as attribute.",
+            "DeepseekV4Config got `key=rope_scaling` in kwargs but hasn't set it as attribute.",
+        ))
+    )
 
 
 def configure_tpu():
@@ -19,6 +31,26 @@ def configure_tpu():
         category=FutureWarning,
         module=r"torch\.cuda(?:\..*)?$",
     )
+    logging.getLogger("transformers.configuration_utils").addFilter(keep_transformers_config_log)
+
+
+def install_checkpoint_manager_compat(module=None):
+    if module is None:
+        from maxtext.common import checkpointing as module
+    native = module.create_orbax_checkpoint_manager
+    if getattr(native, "_llm5_orbax_v1", False):
+        return
+
+    @wraps(native)
+    def create(checkpoint_dir, enable_checkpointing, use_async, save_interval_steps,
+               dataset_type=None, *args, **kwargs):
+        # MaxText 0.2.5 accepts the old positional argument but ignores it.
+        # The actual save and restore still use config.dataset_type.
+        return native(checkpoint_dir, enable_checkpointing, use_async, save_interval_steps,
+                      None, *args, **kwargs)
+
+    create._llm5_orbax_v1 = True
+    module.create_orbax_checkpoint_manager = create
 
 
 def update_training_progress(metrics, step, metric_type):
@@ -237,6 +269,7 @@ def install_deepseek4_loop():
 
 def main():
     configure_tpu()
+    install_checkpoint_manager_compat()
     from llm5.streaming import install_streaming_input
     install_streaming_input()
     install_json_config_support()
@@ -252,6 +285,7 @@ def run_training_config(config_path, start_step=0, checkpoint_hub=None):
     """Run MaxText directly in the caller's process; preserve native exceptions."""
     global _TRAINING_PROGRESS
     configure_tpu()
+    install_checkpoint_manager_compat()
     config = json.loads(Path(config_path).read_text(encoding="utf-8"))
     previous = _TRAINING_PROGRESS
     with tqdm(total=config["steps"]-start_step, desc=config["run_name"], unit="step", mininterval=1.0,
