@@ -44,6 +44,7 @@ def is_eval(text):
 class DomainStream:
     def __init__(self, domain, partition, tokenizer, seed):
         self.domain, self.partition, self.tokenizer = domain, partition, tokenizer
+        self.eos_id = tokenizer.token_to_id("<|endoftext|>")
         self.source = read_json(ROOT / "configs/sources.json")[domain]
         self.rng = random.Random(seed)
         self.buffer = deque()
@@ -84,8 +85,8 @@ class DomainStream:
             self.documents_seen += len(batch)
             for encoded in self.tokenizer.encode_batch(batch, add_special_tokens=False):
                 self.buffer.extend(t for t in encoded.ids if t != 0)
-                self.buffer.append(self.tokenizer.token_to_id("<|endoftext|>"))
-        return [self.buffer.popleft() for _ in range(count)]
+                self.buffer.append(self.eos_id)
+        return np.fromiter((self.buffer.popleft() for _ in range(count)), dtype=np.int32, count=count)
 
     def get_state(self):
         positions = dict(self.pending)
@@ -129,8 +130,13 @@ class StreamingIterator:
         return self
 
     def __next__(self):
-        inputs = np.asarray([self.streams[self.rng.choices(DOMAINS, weights=self.weights)[0]].take(self.length)
-                             for _ in range(self.batch)], dtype=np.int32)
+        rows = {domain: [] for domain in DOMAINS}
+        for row, domain in enumerate(self.rng.choices(DOMAINS, weights=self.weights, k=self.batch)):
+            rows[domain].append(row)
+        inputs = np.empty((self.batch, self.length), dtype=np.int32)
+        for domain, indices in rows.items():
+            if indices:
+                inputs[indices] = self.streams[domain].take(len(indices) * self.length).reshape(-1, self.length)
         targets = np.zeros_like(inputs)
         targets[:, :-1] = inputs[:, 1:]
         positions = np.broadcast_to(np.arange(self.length, dtype=np.int32), inputs.shape)
@@ -160,8 +166,11 @@ class StreamingDataset:
     def __init__(self, config, training):
         self.config, self.training = config, training
         self.iterator = None
+        self.eval_cache = []
 
     def __iter__(self):
+        if not self.training and self.config.eval_steps > 0:
+            return self.cached_eval()
         self.close()
         iterator = StreamingIterator(self.config, self.training)
         if self.training and self.config.load_full_state_path:
@@ -172,10 +181,23 @@ class StreamingDataset:
         self.iterator = iterator
         return iterator
 
+    def cached_eval(self):
+        # Evaluation always starts at the same seed and held-out split.
+        for index in range(self.config.eval_steps):
+            if index == len(self.eval_cache):
+                if self.iterator is None:
+                    self.iterator = StreamingIterator(self.config, False)
+                self.eval_cache.append(next(self.iterator))
+                if len(self.eval_cache) == self.config.eval_steps:
+                    self.iterator.close()
+                    self.iterator = None
+            yield self.eval_cache[index]
+
     def close(self):
         if self.iterator is not None:
             self.iterator.close()
             self.iterator = None
+        self.eval_cache.clear()
 
 
 def install_streaming_input():

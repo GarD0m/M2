@@ -90,7 +90,9 @@ def generate(out, tokenizer, output_root, run_prefix, device_count=1):
     total_steps = stages[-1]["end_step"]
     for i, s in enumerate(stages):
         s["memory_components"] = memory_components(model, s)
-        cfg = dict(model)
+        # Runtime kernel defaults preserve the checkpoint's parameter layout.
+        cfg = dict(use_tokamax_gmm=True, use_gmm_v2=True, use_gmm_v2_heuristic_tiling=True)
+        cfg.update(model)
         cfg["base_config"] = str(ROOT / "configs/maxtext-base.json")
         cfg.update(
             run_name=f"{run_prefix}-{s['name']}", base_output_directory=output_root,
