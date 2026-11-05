@@ -89,7 +89,6 @@ def generate(out, tokenizer, output_root, run_prefix, device_count=1):
         output_root = Path(output_root).resolve().as_posix()
     total_steps = stages[-1]["end_step"]
     for i, s in enumerate(stages):
-        s["memory_components"] = memory_components(model, s)
         # Runtime kernel defaults preserve the checkpoint's parameter layout.
         cfg = dict(
             use_tokamax_gmm=True,
@@ -97,9 +96,17 @@ def generate(out, tokenizer, output_root, run_prefix, device_count=1):
             use_gmm_v2_heuristic_tiling=True,
             moe_use_direct_token_gather=True,
         )
-        if model["decoder_block"] == "deepseek4":
-            cfg.update(use_csa_streamindex_kernel=True, csa_qk_head_chunk_size=4)
         cfg.update(model)
+        if model["decoder_block"] == "deepseek4":
+            # Keep the same weights and optimizer state layout across execution profiles.
+            cfg.update(
+                use_csa_streamindex_kernel=True,
+                csa_qk_head_chunk_size=1,
+                remat_policy="qkv_proj_offloaded",
+                optimizer_memory_host_offload=True,
+                num_vocab_tiling=128,
+            )
+        s["memory_components"] = memory_components(cfg, s)
         cfg["base_config"] = str(ROOT / "configs/maxtext-base.json")
         cfg.update(
             run_name=f"{run_prefix}-{s['name']}", base_output_directory=output_root,
