@@ -142,6 +142,28 @@ def install_metric_diagnostics(module=None):
 def install_json_config_support(module=None):
     if module is None:
         from maxtext.configs import pyconfig as module
+    initialize = module._initialize_pydantic
+    if not getattr(initialize, "_llm5_json_model_overrides", False):
+        @wraps(initialize)
+        def initialize_json(argv=None, *args, **kwargs):
+            if not kwargs.get("base_config") and argv and len(argv) >= 2 and Path(argv[1]).suffix == ".json":
+                config = json.loads(Path(module.resolve_config_path(argv[1])).read_text(encoding="utf-8"))
+                if config.get("override_model_config"):
+                    from omegaconf import OmegaConf
+                    cli = OmegaConf.from_cli(argv[2:])
+                    # MaxText's preset only yields to CLI/kwargs overrides.
+                    # Promote explicit JSON values, preserving CLI and env precedence.
+                    explicit = {
+                        key: value for key, value in config.items()
+                        if key != "base_config" and key not in cli
+                        and module.yaml_key_to_env_key(key) not in os.environ
+                    }
+                    kwargs = {**explicit, **kwargs}
+            return initialize(argv, *args, **kwargs)
+
+        initialize_json._llm5_json_model_overrides = True
+        module._initialize_pydantic = initialize_json
+
     original = module._resolve_or_infer_config
     if getattr(original, "_llm5_json_support", False):
         return

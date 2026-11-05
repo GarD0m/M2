@@ -41,6 +41,32 @@ def is_eval(text):
     return int.from_bytes(hashlib.sha256(text.encode()).digest()[:8], "big") % 1000 < 5
 
 
+def load_tokenizer(directory, expected_vocab_size):
+    path = Path(directory) / "tokenizer.json"
+    tokenizer = Tokenizer.from_file(str(path))
+    vocab_size = tokenizer.get_vocab_size()
+    pad = tokenizer.token_to_id("<|pad|>")
+    eos = tokenizer.token_to_id("<|endoftext|>")
+    if vocab_size != expected_vocab_size or pad != 0 or eos in (None, 0):
+        raise ValueError(
+            f"Tokenizer {path}: vocab={vocab_size} (model expects {expected_vocab_size}), "
+            f"PAD={pad} (expected 0), EOS={eos} (expected a nonzero ID)"
+        )
+    return tokenizer
+
+
+def open_subset(source, subset):
+    from datasets import load_dataset
+    from pyarrow.dataset import ParquetFragmentScanOptions
+
+    return load_dataset(
+        source["repo"], subset["config"], split=subset["split"],
+        revision=source["revision"], streaming=True,
+        columns=[source["column"]], batch_size=16,
+        fragment_scan_options=ParquetFragmentScanOptions(pre_buffer=False),
+    )
+
+
 class DomainStream:
     def __init__(self, domain, partition, tokenizer, seed):
         self.domain, self.partition, self.tokenizer = domain, partition, tokenizer
@@ -53,8 +79,6 @@ class DomainStream:
         self.documents_seen = 0
 
     def next_text(self):
-        from datasets import load_dataset
-        from pyarrow.dataset import ParquetFragmentScanOptions
         while True:
             active = [i for i in range(len(self.source["subsets"])) if i not in self.exhausted]
             if not active:
@@ -62,10 +86,7 @@ class DomainStream:
             index = self.rng.choices(active, weights=[self.source["subsets"][i]["weight"] for i in active])[0]
             if index not in self.datasets:
                 sub = self.source["subsets"][index]
-                ds = load_dataset(self.source["repo"], sub["config"], split=sub["split"],
-                                  revision=self.source["revision"], streaming=True,
-                                  columns=[self.source["column"]], batch_size=16,
-                                  fragment_scan_options=ParquetFragmentScanOptions(pre_buffer=False))
+                ds = open_subset(self.source, sub)
                 if str(index) in self.pending:
                     ds.load_state_dict(self.pending[str(index)])
                 self.datasets[index], self.iterators[index] = ds, iter(ds)
@@ -120,9 +141,7 @@ class StreamingIterator:
         self.weights = [1-stage["math"]-stage["code"], stage["math"], stage["code"]] if training else [.7, .1, .2]
         seed = config.data_shuffle_seed + (0 if training else 10000)
         self.rng = random.Random(seed)
-        tok = Tokenizer.from_file(str(Path(config.tokenizer_path) / "tokenizer.json"))
-        if tok.get_vocab_size() != config.vocab_size or tok.token_to_id("<|pad|>") != 0 or tok.token_to_id("<|endoftext|>") is None:
-            raise ValueError("Tokenizer vocabulary, PAD or EOS differs from the model")
+        tok = load_tokenizer(config.tokenizer_path, config.vocab_size)
         self.streams = {d: DomainStream(d, "train" if training else "eval", tok, seed+i)
                         for i, d in enumerate(DOMAINS)}
 

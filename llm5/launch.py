@@ -7,6 +7,7 @@ import shlex
 import sys
 
 from llm5.plan import MAXTEXT_VERSION, ROOT, digest, read_json
+from llm5.streaming import load_tokenizer
 from llm5.train import run_training_config
 
 
@@ -24,13 +25,7 @@ def load_manifest(path):
 
 def check_data(stage):
     cfg = read_json(stage["config"])
-    tokenizer = Path(cfg["tokenizer_path"])
-    from tokenizers import Tokenizer
-    tok = Tokenizer.from_file(str(tokenizer / "tokenizer.json"))
-    if tok.get_vocab_size() != cfg["vocab_size"] or tok.token_to_id("<|pad|>") != 0:
-        raise ValueError("Tokenizer vocabulary or PAD ID mismatch")
-    if tok.token_to_id("<|endoftext|>") is None:
-        raise ValueError("Tokenizer has no EOS token")
+    load_tokenizer(cfg["tokenizer_path"], cfg["vocab_size"])
     if cfg["max_target_length"] != stage["length"]:
         raise ValueError("Streaming sequence length differs from the plan")
 
