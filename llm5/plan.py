@@ -48,6 +48,10 @@ def curriculum(config, device_count=1):
 
 
 def parameter_count(model):
+    if model["decoder_block"] == "deepseek4":
+        # Compressed attention, indexers, MoE and mHC are counted by MaxText
+        # from the actual parameter tree at initialization.
+        return None
     d, ff, v, n = (model[k] for k in
                     ("base_emb_dim", "base_mlp_dim", "vocab_size", "base_num_decoder_layers"))
     q = model["base_num_query_heads"] * model["head_dim"]
@@ -63,6 +67,8 @@ def memory_components(model, stage):
     q = model["base_num_query_heads"] * model["head_dim"]
     kv = model["base_num_kv_heads"] * model["head_dim"]
     gib = 1024**3
+    if params is None:
+        return {"one_fp32_logits_tile_gib": tokens*model["vocab_size"]*4/model["num_vocab_tiling"]/gib}
     return {
         "bf16_weights_gib": params*2/gib,
         "fp32_gradient_buffer_gib": params*4/gib,
@@ -127,7 +133,8 @@ def main():
     args = p.parse_args()
     values = vars(args)
     m = generate(**values)
-    print(f"Parameters: {m['parameters']:,}; loss tokens: ~{m['approximate_loss_tokens']:,}")
+    count = f"{m['parameters']:,}" if m["parameters"] is not None else "counted at model initialization"
+    print(f"Parameters: {count}; loss tokens: ~{m['approximate_loss_tokens']:,}")
     for s in m["stages"]:
         print(f"{s['name']:>3}  micro={s['microbatch']} GA={s['accumulation']} "
               f"steps={s['num_steps']:,} end={s['end_step']:,} math={s['math']:.0%} code={s['code']:.0%}")

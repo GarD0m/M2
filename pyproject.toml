@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "llm5-tpu"
 version = "0.1.0"
-description = "Five-layer Qwen3 pretraining curriculum for one TPU v6e"
+description = "One scanned DeepSeek V4 HCA-CSA block pretraining on TPU"
 requires-python = ">=3.12"
 dependencies = [
   "datasets>=4,<6", "huggingface-hub>=0.34,<3", "numpy>=2,<3",

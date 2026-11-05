@@ -11,7 +11,7 @@ def main(argv=None):
     p.add_argument("--plan-dir", default="runs/plan-512k")
     p.add_argument("--tokenizer", default="models/tokenizer")
     p.add_argument("--output-root", default="runs/checkpoints")
-    p.add_argument("--run-prefix", default="m2-bf16-512k-v1")
+    p.add_argument("--run-prefix", default="m2-deepseek4-1block-512k-v1")
     p.add_argument("--tokenizer-batch-size", type=int, default=256)
     p.add_argument("--tokenizer-threads", type=int)
     p.add_argument("--hub-repo", default="tim123xyz/Test")

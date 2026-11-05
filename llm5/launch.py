@@ -93,6 +93,7 @@ def main(argv=None, checkpoint_hub=None, resume=None):
         if cfg["load_full_state_path"] and not epath.Path(cfg["load_full_state_path"]).exists():
             raise FileNotFoundError(f"Previous stage full checkpoint missing: {cfg['load_full_state_path']}")
         run_training_config(s["config"], start_step=s["start_step"], checkpoint_hub=checkpoint_hub)
+        checkpoint_hub.sync_logs()
         checkpoint_hub.wait()
         if not epath.Path(checkpoint_items(cfg, s["end_step"])).exists():
             raise RuntimeError("Training exited without the required final full-state checkpoint")
