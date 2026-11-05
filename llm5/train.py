@@ -361,9 +361,13 @@ def install_deepseek4_loop():
 
 
 def install_aligned_logits_tiles(trainer):
+    from maxtext.configs.pyconfig import HyperParameters
+
     native = trainer.vocab_tiling_nnx_loss
-    if getattr(native, "_llm5_aligned_logits_tiles", False):
+    if getattr(native, "_llm5_hyperparameter_logits_tiles", False):
         return
+    if getattr(native, "_llm5_aligned_logits_tiles", False):
+        native = native.__wrapped__
 
     @wraps(native)
     def loss(model, hidden_states, data, config, is_train):
@@ -371,10 +375,14 @@ def install_aligned_logits_tiles(trainer):
         if tokens % 128 == 0:
             tiles = math.gcd(config.num_vocab_tiling, tokens // 128)
             if tiles != config.num_vocab_tiling:
-                config = config.model_copy(update={"num_vocab_tiling": tiles})
+                update = {"num_vocab_tiling": tiles}
+                if isinstance(config, HyperParameters):
+                    config = HyperParameters(config._pydantic_config.model_copy(update=update))
+                else:
+                    config = config.model_copy(update=update)
         return native(model, hidden_states, data, config, is_train)
 
-    loss._llm5_aligned_logits_tiles = True
+    loss._llm5_hyperparameter_logits_tiles = True
     trainer.vocab_tiling_nnx_loss = loss
 
 
