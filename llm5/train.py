@@ -5,9 +5,20 @@ from contextlib import nullcontext
 import warnings
 import math
 import json
+import os
 from tqdm.auto import tqdm
 
 _TRAINING_PROGRESS = None
+
+
+def configure_tpu():
+    os.environ["JAX_PLATFORMS"] = "tpu"
+    warnings.filterwarnings(
+        "ignore",
+        message=r"The pynvml package is deprecated\.",
+        category=FutureWarning,
+        module=r"torch\.cuda(?:\..*)?$",
+    )
 
 
 def update_training_progress(metrics, step, metric_type):
@@ -203,6 +214,7 @@ def install_deepseek4_loop():
 
 
 def main():
+    configure_tpu()
     from llm5.streaming import install_streaming_input
     install_streaming_input()
     install_json_config_support()
@@ -217,6 +229,7 @@ def main():
 def run_training_config(config_path, start_step=0, checkpoint_hub=None):
     """Run MaxText directly in the caller's process; preserve native exceptions."""
     global _TRAINING_PROGRESS
+    configure_tpu()
     config = json.loads(Path(config_path).read_text(encoding="utf-8"))
     previous = _TRAINING_PROGRESS
     with tqdm(total=config["steps"]-start_step, desc=config["run_name"], unit="step", mininterval=1.0,

@@ -4,6 +4,7 @@ from pathlib import Path
 from llm5 import streaming, launch
 from llm5.plan import generate
 from llm5.hub import CheckpointHub
+from llm5.train import configure_tpu
 
 
 def main(argv=None):
@@ -16,6 +17,7 @@ def main(argv=None):
     p.add_argument("--tokenizer-threads", type=int)
     p.add_argument("--hub-repo", default="tim123xyz/Test")
     args = p.parse_args(argv)
+    configure_tpu()
     streaming.configure(args.tokenizer_batch_size, args.tokenizer_threads)
     device_count = launch.check_runtime()
     manifest = generate(args.plan_dir, args.tokenizer,
