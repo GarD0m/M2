@@ -1,37 +1,45 @@
 """Native MaxText entry point with fused-QKV Muon dimension support."""
 from functools import wraps
+from importlib import import_module
 from pathlib import Path
 from contextlib import nullcontext
 import warnings
 import math
 import json
-import logging
 import os
 from tqdm.auto import tqdm
 
 _TRAINING_PROGRESS = None
 
 
-def keep_transformers_config_log(record):
-    message = record.getMessage()
-    return not (
-        record.levelno == logging.WARNING
-        and message.startswith((
-            "DeepseekV32Config got `key=rope_scaling` in kwargs but hasn't set it as attribute.",
-            "DeepseekV4Config got `key=rope_scaling` in kwargs but hasn't set it as attribute.",
-        ))
-    )
-
-
 def configure_tpu():
     os.environ["JAX_PLATFORMS"] = "tpu"
-    warnings.filterwarnings(
-        "ignore",
-        message=r"The pynvml package is deprecated\.",
-        category=FutureWarning,
-        module=r"torch\.cuda(?:\..*)?$",
-    )
-    logging.getLogger("transformers.configuration_utils").addFilter(keep_transformers_config_log)
+
+
+def load_maxtext_conversion_configs():
+    from transformers.configuration_utils import PreTrainedConfig
+
+    module_name = "maxtext.checkpoint_conversion.utils.hf_model_configs"
+    original = PreTrainedConfig.__post_init__
+
+    @wraps(original)
+    def initialize(config, **kwargs):
+        cls = type(config)
+        if (
+            cls.__module__ == module_name
+            and cls.__name__ in ("DeepseekV32Config", "DeepseekV4Config")
+            and not hasattr(config, "rope_parameters")
+            and kwargs.get("rope_scaling")
+        ):
+            config.rope_parameters = dict(kwargs.pop("rope_scaling"))
+        return original(config, **kwargs)
+
+    # These two legacy configs are constructed at import time.
+    PreTrainedConfig.__post_init__ = initialize
+    try:
+        import_module(module_name)
+    finally:
+        PreTrainedConfig.__post_init__ = original
 
 
 def install_checkpoint_manager_compat(module=None):
@@ -269,6 +277,7 @@ def install_deepseek4_loop():
 
 def main():
     configure_tpu()
+    load_maxtext_conversion_configs()
     install_checkpoint_manager_compat()
     from llm5.streaming import install_streaming_input
     install_streaming_input()
@@ -285,6 +294,7 @@ def run_training_config(config_path, start_step=0, checkpoint_hub=None):
     """Run MaxText directly in the caller's process; preserve native exceptions."""
     global _TRAINING_PROGRESS
     configure_tpu()
+    load_maxtext_conversion_configs()
     install_checkpoint_manager_compat()
     config = json.loads(Path(config_path).read_text(encoding="utf-8"))
     previous = _TRAINING_PROGRESS
