@@ -25,7 +25,7 @@ os.environ["JAX_PLATFORMS"] = "tpu"
 os.environ["JAX_COMPILATION_CACHE_DIR"] = "/content/jax-cache"
 ```
 
-訓練的 BF16 Q/KV、參數與 optimizer state 放在 TPU HBM。CSA teacher 每組處理 1 個 head。Logits 最多分成 128 塊，較小的驗證 batch 會減少塊數以維持 128 tokens 對齊。mHC RMSNorm 和 HyperHead 的大型運算元使用 BF16，歸約保留 FP32。
+保存的 BF16 Q/KV 和 optimizer state 使用 host offload，模型參數放在 TPU HBM。CSA teacher 每組處理 1 個 head。Logits 最多分成 128 塊，較小的驗證 batch 會減少塊數以維持 128 tokens 對齊。mHC RMSNorm 和 HyperHead 的大型運算元使用 BF16，歸約保留 FP32。
 
 開始／續訓：
 
