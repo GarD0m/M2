@@ -1,5 +1,5 @@
 """Native MaxText entry point with fused-QKV Muon dimension support."""
-from functools import wraps
+from functools import partial, wraps
 from importlib import import_module
 from pathlib import Path
 from contextlib import nullcontext
@@ -227,26 +227,54 @@ def install_fused_qkv_muon_support(module=None):
         module.ATTENTION_QKV_NAMES += ("qkv_proj",)
 
 
-def install_mhc_hyper_head():
+def install_mhc_low_memory():
     import jax
     import jax.numpy as jnp
     from maxtext.layers import mhc, normalizations
 
-    # Clear the tiled RMSNorm alias left by an older run in the same kernel.
-    mhc.RMSNorm = normalizations.RMSNorm
     native_head = mhc.DeepSeek4HyperHead.__call__
-    if getattr(native_head, "_llm5_token_tiling", False):
+    if getattr(native_head, "_llm5_mhc_low_memory", False):
         return
+    if getattr(native_head, "_llm5_token_tiling", False):
+        native_head = native_head.__wrapped__
 
-    def apply_tiles(function, inputs):
-        batch, length, *features = inputs.shape
-        tile = 64
-        if length <= tile or length % tile:
-            return function(inputs)
-        chunks = inputs.reshape(batch, length // tile, tile, *features).swapaxes(0, 1)
-        # Recompute each tile in backward instead of stacking its FP32 activations.
-        outputs = jax.lax.map(jax.checkpoint(function, prevent_cse=False), chunks)
-        return outputs.swapaxes(0, 1).reshape(batch, length, *outputs.shape[3:])
+    def row_dot(x, y):
+        return jnp.einsum("bsd,bsd->bs", x, y, preferred_element_type=jnp.float32)[..., None]
+
+    def normalize(x, epsilon):
+        inverse_rms = jax.lax.rsqrt(row_dot(x, x) / x.shape[-1] + epsilon)
+        return x * inverse_rms.astype(x.dtype), inverse_rms
+
+    @partial(jax.custom_vjp, nondiff_argnums=(2,))
+    def rms_norm(x, scale, epsilon):
+        normalized, _ = normalize(x, epsilon)
+        return normalized * scale
+
+    def rms_forward(x, scale, epsilon):
+        normalized, inverse_rms = normalize(x, epsilon)
+        return normalized * scale, (x, scale, inverse_rms)
+
+    def rms_backward(epsilon, residuals, gradient):
+        x, scale, inverse_rms = residuals
+        inverse_bf16 = inverse_rms.astype(x.dtype)
+        normalized = x * inverse_bf16
+        scaled_gradient = gradient * scale
+        correction = (row_dot(normalized, scaled_gradient) / x.shape[-1]).astype(x.dtype)
+        dx = (scaled_gradient - normalized * correction) * inverse_bf16
+        dscale = jnp.einsum("bsd,bsd->d", gradient, normalized, preferred_element_type=jnp.float32)
+        return dx, dscale.astype(scale.dtype)
+
+    rms_norm.defvjp(rms_forward, rms_backward)
+
+    class MhcRMSNorm(normalizations.RMSNorm):
+        def __call__(self, inputs, out_sharding=None):
+            if (self.dtype != jnp.bfloat16 or inputs.dtype != jnp.bfloat16
+                    or inputs.ndim != 3 or out_sharding is not None
+                    or not self.with_scale or self.scale_offset != 0
+                    or self.parameter_memory_host_offload):
+                return super().__call__(inputs, out_sharding)
+            scale = self.scale.get_value().astype(jnp.bfloat16)
+            return rms_norm(inputs, scale, self.epsilon)
 
     @wraps(native_head)
     def hyper_head(self, inputs):
@@ -258,12 +286,12 @@ def install_mhc_hyper_head():
             chunk = chunk.astype(jnp.bfloat16)
             flat = chunk.reshape(batch, length, streams * width)
             precision = jax.lax.Precision(self.config.matmul_precision)
-            variance = jnp.mean(jnp.square(flat.astype(jnp.float32)), axis=-1)
+            variance = row_dot(flat, flat) / flat.shape[-1]
             weights = jnp.asarray(self.hc_fn[...], jnp.bfloat16)
             mixes = jnp.einsum("bsd,dk->bsk", flat, weights, precision=precision,
                               preferred_element_type=jnp.float32)
             # Apply the scalar RMS correction after projection so the large operand stays BF16.
-            mixes = mixes * jax.lax.rsqrt(variance[..., None] + self.eps)
+            mixes = mixes * jax.lax.rsqrt(variance + self.eps)
             scale = jnp.asarray(self.hc_scale[...], jnp.float32)
             bias = jnp.asarray(self.hc_base[...], jnp.float32)
             gates = (jax.nn.sigmoid(mixes * scale + bias) + self.eps).astype(jnp.bfloat16)
@@ -271,10 +299,11 @@ def install_mhc_hyper_head():
                                preferred_element_type=jnp.float32)
             return output.astype(self.dtype)
 
-        return apply_tiles(collapse, inputs)
+        return jax.checkpoint(collapse)(inputs)
 
-    hyper_head._llm5_token_tiling = True
+    hyper_head._llm5_mhc_low_memory = True
     mhc.DeepSeek4HyperHead.__call__ = hyper_head
+    mhc.RMSNorm = MhcRMSNorm
 
 
 def install_deepseek4_loop():
@@ -284,7 +313,7 @@ def install_deepseek4_loop():
     from maxtext.layers import moe, nnx_decoders
     from maxtext.models import deepseek4
 
-    install_mhc_hyper_head()
+    install_mhc_low_memory()
     decoder = nnx_decoders.NNXDecoder
     native = decoder._apply_deepseek4_scanned_blocks
     if getattr(native, "_llm5_loop3", False):

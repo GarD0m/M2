@@ -25,7 +25,7 @@ os.environ["JAX_PLATFORMS"] = "tpu"
 os.environ["JAX_COMPILATION_CACHE_DIR"] = "/content/jax-cache"
 ```
 
-DeepSeek V4 的啟動計畫會將保存的 BF16 Q/KV 和 optimizer state 移到 host RAM，並將 CSA teacher 每組縮到 1 個 head、logits 分成 128 塊。這組設定優先降低 TPU HBM，host 傳輸與較細分塊可能增加每步時間。
+DeepSeek V4 的啟動計畫會將保存的 BF16 Q/KV 和 optimizer state 移到 host RAM，並將 CSA teacher 每組縮到 1 個 head、logits 分成 256 塊。mHC RMSNorm 和 HyperHead 的大型運算元使用 BF16，歸約保留 FP32。Host 傳輸與較細分塊可能增加每步時間。
 
 開始／續訓：
 
