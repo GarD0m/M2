@@ -227,7 +227,7 @@ def install_fused_qkv_muon_support(module=None):
         module.ATTENTION_QKV_NAMES += ("qkv_proj",)
 
 
-def install_mhc_token_tiling():
+def install_mhc_hyper_head():
     import jax
     import jax.numpy as jnp
     from maxtext.layers import mhc
@@ -271,17 +271,8 @@ def install_mhc_token_tiling():
 
         return apply_tiles(collapse, inputs)
 
-    class MhcRMSNorm(mhc.RMSNorm):
-        def __call__(self, inputs, out_sharding=None):
-            normalize = super().__call__
-            if out_sharding is not None:
-                return normalize(inputs, out_sharding)
-            return apply_tiles(normalize, inputs)
-
     hyper_head._llm5_token_tiling = True
     mhc.DeepSeek4HyperHead.__call__ = hyper_head
-    # This alias is used only for mHC's per-token stream normalization.
-    mhc.RMSNorm = MhcRMSNorm
 
 
 def install_deepseek4_loop():
@@ -291,7 +282,7 @@ def install_deepseek4_loop():
     from maxtext.layers import moe, nnx_decoders
     from maxtext.models import deepseek4
 
-    install_mhc_token_tiling()
+    install_mhc_hyper_head()
     decoder = nnx_decoders.NNXDecoder
     native = decoder._apply_deepseek4_scanned_blocks
     if getattr(native, "_llm5_loop3", False):
