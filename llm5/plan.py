@@ -2,10 +2,12 @@
 import argparse
 import hashlib
 import json
+import math
 from pathlib import Path
 
 MAXTEXT_VERSION = "0.2.5"
 ROOT = Path(__file__).resolve().parents[1]
+CSA_HEAD_CHUNK_BUDGET = 128 * 1024**2
 
 
 def read_json(path):
@@ -25,8 +27,10 @@ def curriculum(config, device_count=1):
     for spec in config["stages"]:
         s = dict(spec)
         effective = s["microbatch"] * s["accumulation"]
-        if s["microbatch"] < device_count or effective % s["microbatch"] or s["microbatch"] % device_count:
-            raise ValueError("Global microbatch must divide effective batch and be divisible by device_count")
+        if s["microbatch"] < device_count or s["microbatch"] % device_count:
+            raise ValueError("Global microbatch must be positive and divisible by device_count")
+        if s["accumulation"] < 1:
+            raise ValueError("Gradient accumulation must be positive")
         s["device_count"] = device_count
         s["per_device_microbatch"] = s["microbatch"] // device_count
         if not (0 <= s["math"] <= 1 and 0 <= s["code"] <= 1 - s["math"]):
@@ -89,7 +93,6 @@ def generate(out, tokenizer, output_root, run_prefix, device_count=1):
         output_root = Path(output_root).resolve().as_posix()
     total_steps = stages[-1]["end_step"]
     for i, s in enumerate(stages):
-        # Runtime kernel defaults preserve the checkpoint's parameter layout.
         cfg = dict(
             use_tokamax_gmm=True,
             use_gmm_v2=True,
@@ -98,14 +101,31 @@ def generate(out, tokenizer, output_root, run_prefix, device_count=1):
         )
         cfg.update(model)
         if model["decoder_block"] == "deepseek4":
-            # Keep the same weights and optimizer state layout across execution profiles.
+            length = s["length"]
+            batch = max(s["per_device_microbatch"], math.ceil(model["eval_per_device_batch_size"]))
+            csa_fp32_bytes_per_head = batch * length * (length // 4) * 4
+            head_limit = max(1, CSA_HEAD_CHUNK_BUDGET // csa_fp32_bytes_per_head)
+            head_divisor = math.gcd(model["base_num_query_heads"], model["indexer_n_heads"])
+            head_chunk = max(
+                heads for heads in range(1, min(head_limit, head_divisor) + 1)
+                if head_divisor % heads == 0
+            )
             cfg.update(
                 use_csa_streamindex_kernel=True,
-                csa_qk_head_chunk_size=1,
-                remat_policy="save_qkv_proj",
+                csa_qk_head_chunk_size=head_chunk,
+                remat_policy="custom",
+                decoder_layer_input="remat",
+                query_proj="device",
+                key_proj="device",
+                value_proj="device",
+                kv_proj="device",
+                qkv_proj="device",
+                moe_routing_maps="device",
+                router_topk_matmul_vjp=True,
+                sinkhorn_iterations=10,
                 optimizer_memory_host_offload=False,
                 parameter_memory_host_offload=False,
-                num_vocab_tiling=128,
+                num_vocab_tiling=32,
             )
         s["memory_components"] = memory_components(cfg, s)
         cfg["base_config"] = str(ROOT / "configs/maxtext-base.json")

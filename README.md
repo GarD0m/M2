@@ -2,7 +2,7 @@
 
 一個 DeepSeek V4 HCA＋CSA decoder block（兩個 layers），使用原生 scan 跑一輪。V=65,536、D=2,048。每層有 16 個 routed experts，每 token 選 3 個，每個 expert 寬度 2,048。總參數約 5.46 億，精確值由 MaxText 在初始化時統計。
 
-Muon、Tokamax、SEQ_MINOR、fused MLP、save_qkv_proj remat。DeepSeek V4 使用原生 compressed Q/KV projections，因此關閉 Qwen3 的 fused QKV。BF16 權重與主要矩陣運算；logits、loss、梯度累積及 momentum 使用 FP32，沒有 FP32 master weights。`model_name=deepseek4-tiny` 選用 MaxText 的 V4 routing 路徑，`override_model_config=true` 以本專案 JSON 覆寫尺寸，不會建立官方 tiny preset 的 43 層模型。
+使用 Muon、Tokamax Splash（SEQ_MINOR）與 Tokamax GMM v2。DeepSeek V4 使用原生 compressed Q/KV projections 和 routed MoE。BF16 權重與主要矩陣運算，logits、loss、梯度累積及 momentum 使用 FP32。`model_name=deepseek4-tiny` 選用 MaxText 的 V4 routing 路徑，`override_model_config=true` 以本專案 JSON 覆寫尺寸。
 
 ## Colab
 
@@ -25,7 +25,9 @@ os.environ["JAX_PLATFORMS"] = "tpu"
 os.environ["JAX_COMPILATION_CACHE_DIR"] = "/content/jax-cache"
 ```
 
-保存的 BF16 Q/KV 和 optimizer state 使用 host offload，模型參數放在 TPU HBM。CSA teacher 每組處理 1 個 head。Logits 最多分成 128 塊，較小的驗證 batch 會減少塊數以維持 128 tokens 對齊。mHC RMSNorm 和 HyperHead 的大型運算元使用 BF16，歸約保留 FP32。
+自訂 remat 在 TPU 上保留 Q/KV projections 和 MoE top-k 路由索引。MoE 反向重用排序索引，router 梯度採用 MaxText 的 dense VJP。模型參數與 optimizer state 也留在 TPU。單裝置下，CSA teacher 在 1K／2K 分別以 4／2 heads 為一組，4K 起每組 1 head。訓練的 logits 分成 32 塊，每塊 1024 tokens，單一 FP32 logits 張量為 256 MiB。驗證依 batch 縮減分塊數，維持 128 tokens 對齊。mHC RMSNorm 和 HyperHead 的大型運算元使用 BF16，歸約保留 FP32。
+
+mHC 的 Sinkhorn 使用 10 次迭代，保留 FP32 正規化。
 
 開始／續訓：
 
@@ -40,7 +42,7 @@ os.environ["JAX_COMPILATION_CACHE_DIR"] = "/content/jax-cache"
 
 關閉 HF／datasets 自帶的 `Resolving data files` 等進度條。只保留固定位置動態更新的訓練進度條，完成後不保留舊進度條。
 
-Tokenizer 使用同程序 Rust 多執行緒的 `encode_batch`，預設每批 256 篇文件、最多 8 個 threads，不建立 Python worker 程序。可調整：
+Tokenizer 使用同程序 Rust 多執行緒的 `encode_batch_fast`，略過訓練用不到的字元位置。分詞結果在主機端用 NumPy 批次組裝。預設每批 256 篇文件、最多 8 個 threads。可調整：
 
 ```python
 %run -m llm5.start --tokenizer-batch-size 256 --tokenizer-threads 8
@@ -64,6 +66,18 @@ TensorBoard logdir 固定為 `<output-root>/<run-name>/tensorboard`。每個 che
 ```
 
 TensorBoard 只寫入訓練 loss、整次驗證的平均 loss、學習率和每裝置 tokens/s。
+
+## JAX 瓶頸分析
+
+在 Colab 用獨立設定檔啟用 MaxText 的 JAX XPlane trace：
+
+```python
+%run -m llm5.start --profile-config configs/profiler.json
+```
+
+預設在每個執行中的長度階段，從開始或續訓位置跳過 5 個 optimizer steps，再擷取最多 5 步。若剩餘步數不足以跳過暖機區間，該階段會略過擷取。可在 `configs/profiler.json` 調整跳過與擷取的步數。擷取後會繼續正常訓練。
+
+Trace 存在本機的 `<output-root>/<run-name>/tensorboard/plugins/profile/`。在 Colab 安裝 `xprof`（`%pip install xprof`），再開啟上述 TensorBoard 的 **Profile → Trace Viewer**。對照 `train` step、主機資料載入與 TPU kernel 時間軸，查看 TPU 空檔是否與讀取、分詞、資料傳輸或同步重疊。擷取期間會同步 TPU，分析平常的 tokens/s 時可使用擷取區間以外的數值。Trace 留在 Colab runtime 本機。
 
 DeepSeek V4 預設 run prefix 是 `m2-deepseek4-1pass-16e-512k-v1`。Hub 在 `runs/<run-prefix>/latest.json` 保存獨立續訓索引，同時更新根目錄 `latest.json`。單輪訓練使用自己的 checkpoint 索引。
 

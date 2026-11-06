@@ -23,11 +23,11 @@ def load_manifest(path):
     return manifest
 
 
-def check_data(stage):
-    cfg = read_json(stage["config"])
-    load_tokenizer(cfg["tokenizer_path"], cfg["vocab_size"])
+def check_data(stage, cfg, validate_tokenizer):
     if cfg["max_target_length"] != stage["length"]:
         raise ValueError("Streaming sequence length differs from the plan")
+    if validate_tokenizer:
+        load_tokenizer(cfg["tokenizer_path"], cfg["vocab_size"])
 
 
 def check_runtime():
@@ -49,7 +49,7 @@ def command(config, overrides=()):
     return [sys.executable, "-m", "llm5.train", str(config), *overrides]
 
 
-def main(argv=None, checkpoint_hub=None, resume=None):
+def main(argv=None, checkpoint_hub=None, resume=None, profile=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--manifest", default="runs/plan/manifest.json")
     p.add_argument("--check-data", action="store_true")
@@ -60,7 +60,7 @@ def main(argv=None, checkpoint_hub=None, resume=None):
     if args.execute and checkpoint_hub is None:
         from llm5.hub import CheckpointHub
         with CheckpointHub(args.hub_repo, manifest) as hub:
-            return main(argv, checkpoint_hub=hub, resume=hub.restore_latest())
+            return main(argv, checkpoint_hub=hub, resume=hub.restore_latest(), profile=profile)
     if args.execute:
         os.environ.setdefault("JAX_PLATFORMS", "tpu")
         # MaxText initializes distributed JAX before its first device query.
@@ -69,10 +69,21 @@ def main(argv=None, checkpoint_hub=None, resume=None):
         if resume is not None and index < resume["index"]:
             print(f"{s['name']} already completed before restored checkpoint", flush=True)
             continue
-        if args.check_data or args.execute:
-            check_data(s)
         cfg = read_json(s["config"])
-        cmd = command(s["config"])
+        if args.check_data or args.execute:
+            check_data(s, cfg, validate_tokenizer=args.check_data)
+        resuming_stage = resume is not None and resume["index"] == index
+        overrides = ()
+        if profile is not None:
+            first_step = resume["step"] if resuming_stage else s["start_step"]
+            skip = profile["skip_first_n_steps_for_profiler"]
+            if first_step + skip < s["end_step"]:
+                overrides = ("profiler=xplane", "profile_cleanly=true",
+                             f"skip_first_n_steps_for_profiler={skip}",
+                             f"profiler_steps={profile['profiler_steps']}")
+            elif first_step < s["end_step"]:
+                print(f"{s['name']}: too few steps left after profiler warmup; skipping trace", flush=True)
+        cmd = command(s["config"], overrides)
         print(shlex.join(cmd), flush=True)
         if not args.execute:
             continue
@@ -80,14 +91,15 @@ def main(argv=None, checkpoint_hub=None, resume=None):
         if epath.Path(checkpoint_items(cfg, s["end_step"])).exists():
             print(f"{s['name']} complete; keeping its saved full state", flush=True)
             continue
-        if resume is not None and resume["index"] == index:
+        if resuming_stage:
             # Native auto-restore loads this stage's items AND streaming cursor.
             # A fresh runtime need not download the preceding stage as well.
             cfg["load_full_state_path"] = ""
             Path(s["config"]).write_text(json.dumps(cfg, indent=2), encoding="utf-8")
         if cfg["load_full_state_path"] and not epath.Path(cfg["load_full_state_path"]).exists():
             raise FileNotFoundError(f"Previous stage full checkpoint missing: {cfg['load_full_state_path']}")
-        run_training_config(s["config"], start_step=s["start_step"], checkpoint_hub=checkpoint_hub)
+        run_training_config(s["config"], start_step=s["start_step"], checkpoint_hub=checkpoint_hub,
+                            overrides=overrides)
         checkpoint_hub.sync_logs()
         checkpoint_hub.wait()
         if not epath.Path(checkpoint_items(cfg, s["end_step"])).exists():

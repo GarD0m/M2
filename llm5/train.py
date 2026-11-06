@@ -144,6 +144,8 @@ def nonfinite_metrics(metrics):
 
 
 def install_metric_diagnostics(module=None):
+    from jax import device_get
+
     if module is None:
         from maxtext.common import metric_logger as module
     original = module.MetricLogger.write_metrics
@@ -154,7 +156,9 @@ def install_metric_diagnostics(module=None):
 
     @wraps(original)
     def write_metrics(self, metrics, step, metric_type="train"):
-        metrics = prepare_perplexity_metrics(metrics or {})
+        metrics = dict(metrics or {})
+        metrics.update(device_get({key: metrics[key] for key in ("scalar", "scalars") if key in metrics}))
+        metrics = prepare_perplexity_metrics(metrics)
         # Exponential range overflow is represented by the finite log metric.
         bad = nonfinite_metrics(serializable_perplexity_metrics(metrics))
         if bad:
@@ -343,6 +347,7 @@ def install_deepseek4_support():
     from maxtext.models import deepseek4
 
     install_mhc_low_memory()
+    install_moe_route_reuse(moe)
     decoder = nnx_decoders.NNXDecoder
     native = decoder._apply_deepseek4_scanned_blocks
     if getattr(native, "_llm5_loop3_remat", False) or getattr(native, "_llm5_loop3", False):
@@ -373,6 +378,40 @@ def install_deepseek4_support():
     deepseek4.moe = SimpleNamespace(RoutedAndSharedMoE=create_mlp)
 
 
+def install_moe_route_reuse(moe):
+    import jax
+    import jax.numpy as jnp
+    from jax.ad_checkpoint import checkpoint_name
+
+    native = moe._route_activations
+    if getattr(native, "_llm5_reuse_permutation", False):
+        return
+
+    def route_forward(inputs, selected_experts):
+        top_k = selected_experts.size // inputs.shape[0]
+        permutation = checkpoint_name(jnp.argsort(selected_experts.reshape(-1)), "moe_routing_maps")
+        return inputs[permutation // top_k], permutation.reshape(inputs.shape[0], top_k)
+
+    @jax.custom_vjp
+    def route(inputs, selected_experts):
+        return route_forward(inputs, selected_experts)[0]
+
+    def route_backward(permutation, gradient):
+        ordered = gradient[jnp.argsort(permutation.reshape(-1))]
+        return ordered.reshape(permutation.shape + gradient.shape[1:]).sum(axis=1), None
+
+    route.defvjp(route_forward, route_backward)
+
+    @wraps(native)
+    def route_activations(inputs, selected_experts):
+        if not isinstance(inputs, jax.Array) or inputs.shape[0] == 0:
+            return native(inputs, selected_experts)
+        return route(inputs, selected_experts)
+
+    route_activations._llm5_reuse_permutation = True
+    moe._route_activations = route_activations
+
+
 def install_aligned_logits_tiles(trainer):
     from maxtext.configs.pyconfig import HyperParameters
 
@@ -386,7 +425,11 @@ def install_aligned_logits_tiles(trainer):
     def loss(model, hidden_states, data, config, is_train):
         tokens = math.prod(hidden_states.shape[:-1])
         if tokens % 128 == 0:
-            tiles = math.gcd(config.num_vocab_tiling, tokens // 128)
+            tile_limit = config.num_vocab_tiling
+            if not is_train and config.decoder_block == "deepseek4":
+                eval_ratio = min(1, config.eval_per_device_batch_size / config.per_device_batch_size)
+                tile_limit = max(1, math.ceil(tile_limit * eval_ratio))
+            tiles = math.gcd(tile_limit, tokens // 128)
             if tiles != config.num_vocab_tiling:
                 update = {"num_vocab_tiling": tiles}
                 if isinstance(config, HyperParameters):
@@ -399,7 +442,7 @@ def install_aligned_logits_tiles(trainer):
     trainer.vocab_tiling_nnx_loss = loss
 
 
-def main():
+def load_trainer():
     configure_tpu()
     load_maxtext_conversion_configs()
     install_checkpoint_manager_compat()
@@ -409,37 +452,33 @@ def main():
     install_fused_qkv_muon_support()
     install_metric_diagnostics()
     install_deepseek4_support()
-    from absl import app
     from maxtext.trainers.pre_train import train
     install_aligned_logits_tiles(train)
+    return train
+
+
+def main():
+    from absl import app
+
+    train = load_trainer()
     app.run(train.main)
 
 
-def run_training_config(config_path, start_step=0, checkpoint_hub=None):
+def run_training_config(config_path, start_step=0, checkpoint_hub=None, overrides=()):
     """Run MaxText directly in the caller's process; preserve native exceptions."""
     global _TRAINING_PROGRESS
-    configure_tpu()
-    load_maxtext_conversion_configs()
-    install_checkpoint_manager_compat()
     config = json.loads(Path(config_path).read_text(encoding="utf-8"))
     previous = _TRAINING_PROGRESS
     with tqdm(total=config["steps"]-start_step, desc=config["run_name"], unit="step", mininterval=1.0,
               position=0, leave=False, dynamic_ncols=True) as progress:
         _TRAINING_PROGRESS = {"bar": progress, "start_step": start_step, "initialized": False}
         try:
-            from llm5.streaming import install_streaming_input
-            install_streaming_input()
-            install_json_config_support()
-            install_fused_qkv_muon_support()
-            install_metric_diagnostics()
-            install_deepseek4_support()
             from absl import flags
-            from maxtext.trainers.pre_train import train
-            install_aligned_logits_tiles(train)
+            train = load_trainer()
             if not flags.FLAGS.is_parsed():
                 flags.FLAGS(["llm5"])
             with checkpoint_hub.capture() if checkpoint_hub is not None else nullcontext():
-                return train.main(["llm5.train", str(config_path)])
+                return train.main(["llm5.train", str(config_path), *overrides])
         finally:
             _TRAINING_PROGRESS = previous
 

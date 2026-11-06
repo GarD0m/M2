@@ -1,6 +1,6 @@
 """Checkpointable HF streaming -> batched BPE -> native MaxText batches."""
-from collections import deque
 import hashlib
+from itertools import accumulate
 import json
 import os
 from pathlib import Path
@@ -73,17 +73,22 @@ class DomainStream:
         self.eos_id = tokenizer.token_to_id("<|endoftext|>")
         self.source = read_json(ROOT / "configs/sources.json")[domain]
         self.rng = random.Random(seed)
-        self.buffer = deque()
+        self.buffer = np.empty(0, dtype=np.int32)
         self.datasets, self.iterators, self.pending = {}, {}, {}
         self.exhausted = set()
+        self.update_subset_choices()
         self.documents_seen = 0
+
+    def update_subset_choices(self):
+        subsets = self.source["subsets"]
+        self.active = [index for index in range(len(subsets)) if index not in self.exhausted]
+        self.cumulative_weights = list(accumulate(subsets[index]["weight"] for index in self.active))
 
     def next_text(self):
         while True:
-            active = [i for i in range(len(self.source["subsets"])) if i not in self.exhausted]
-            if not active:
+            if not self.active:
                 raise RuntimeError(f"{self.domain} source exhausted; refusing to silently repeat data")
-            index = self.rng.choices(active, weights=[self.source["subsets"][i]["weight"] for i in active])[0]
+            index = self.rng.choices(self.active, cum_weights=self.cumulative_weights)[0]
             if index not in self.datasets:
                 sub = self.source["subsets"][index]
                 ds = open_subset(self.source, sub)
@@ -94,6 +99,7 @@ class DomainStream:
                 text = next(self.iterators[index])[self.source["column"]]
             except StopIteration:
                 self.exhausted.add(index)
+                self.update_subset_choices()
                 continue
             if not isinstance(text, str):
                 raise TypeError(f"{self.domain} content must be text")
@@ -101,26 +107,39 @@ class DomainStream:
                 return text
 
     def take(self, count):
-        while len(self.buffer) < count:
+        tokens = np.empty(count, dtype=np.int32)
+        offset = 0
+        while offset < count:
+            size = min(len(self.buffer), count - offset)
+            tokens[offset:offset + size] = self.buffer[:size]
+            self.buffer = self.buffer[size:]
+            offset += size
+            if offset == count:
+                break
+
             batch = [self.next_text() for _ in range(_BATCH_SIZE)]
             self.documents_seen += len(batch)
-            for encoded in self.tokenizer.encode_batch(batch, add_special_tokens=False):
-                self.buffer.extend(t for t in encoded.ids if t != 0)
-                self.buffer.append(self.eos_id)
-        return np.fromiter((self.buffer.popleft() for _ in range(count)), dtype=np.int32, count=count)
+            ids = []
+            for encoded in self.tokenizer.encode_batch_fast(batch, add_special_tokens=False):
+                ids.extend(encoded.ids)
+                ids.append(self.eos_id)
+            encoded_tokens = np.asarray(ids, dtype=np.int32)
+            self.buffer = encoded_tokens[encoded_tokens != 0]
+        return tokens
 
     def get_state(self):
         positions = dict(self.pending)
         positions.update({str(i): ds.state_dict() for i, ds in self.datasets.items()})
-        return dict(rng=self.rng.getstate(), buffer=list(self.buffer), datasets=positions,
+        return dict(rng=self.rng.getstate(), buffer=self.buffer.tolist(), datasets=positions,
                     exhausted=sorted(self.exhausted), documents_seen=self.documents_seen)
 
     def set_state(self, state):
         self.close()
         self.pending = state["datasets"]
         self.rng.setstate(tuples(state["rng"]))
-        self.buffer = deque(state["buffer"])
+        self.buffer = np.asarray(state["buffer"], dtype=np.int32)
         self.exhausted = set(state["exhausted"])
+        self.update_subset_choices()
         self.documents_seen = state["documents_seen"]
 
     def close(self):
@@ -133,16 +152,21 @@ class DomainStream:
 
 
 class StreamingIterator:
-    def __init__(self, config, training):
-        self.config, self.training = config, training
+    def __init__(self, config, training, tokenizer=None):
         self.length = config.max_target_length
         self.batch = int(config.global_batch_size_to_load if training else config.global_batch_size_to_load_eval)
-        stage = next(s for s in read_json(ROOT / "configs/curriculum.json")["stages"] if s["length"] == self.length)
-        self.weights = [1-stage["math"]-stage["code"], stage["math"], stage["code"]] if training else [.7, .1, .2]
+        self.shape = (self.batch, self.length)
+        self.positions = np.broadcast_to(np.arange(self.length, dtype=np.int32), self.shape)
+        self.input_segments = np.broadcast_to(np.int32(1), self.shape)
+        self.weights = [.7, .1, .2]
+        if training:
+            stage = next(s for s in read_json(ROOT / "configs/curriculum.json")["stages"] if s["length"] == self.length)
+            self.weights = [1-stage["math"]-stage["code"], stage["math"], stage["code"]]
         seed = config.data_shuffle_seed + (0 if training else 10000)
         self.rng = random.Random(seed)
-        tok = load_tokenizer(config.tokenizer_path, config.vocab_size)
-        self.streams = {d: DomainStream(d, "train" if training else "eval", tok, seed+i)
+        if tokenizer is None:
+            tokenizer = load_tokenizer(config.tokenizer_path, config.vocab_size)
+        self.streams = {d: DomainStream(d, "train" if training else "eval", tokenizer, seed+i)
                         for i, d in enumerate(DOMAINS)}
 
     def __iter__(self):
@@ -152,15 +176,17 @@ class StreamingIterator:
         rows = {domain: [] for domain in DOMAINS}
         for row, domain in enumerate(self.rng.choices(DOMAINS, weights=self.weights, k=self.batch)):
             rows[domain].append(row)
-        inputs = np.empty((self.batch, self.length), dtype=np.int32)
+        inputs = np.empty(self.shape, dtype=np.int32)
         for domain, indices in rows.items():
             if indices:
                 inputs[indices] = self.streams[domain].take(len(indices) * self.length).reshape(-1, self.length)
-        targets = np.zeros_like(inputs)
+        targets = np.empty_like(inputs)
         targets[:, :-1] = inputs[:, 1:]
-        positions = np.broadcast_to(np.arange(self.length, dtype=np.int32), inputs.shape)
-        return dict(inputs=inputs, targets=targets, inputs_position=positions, targets_position=positions,
-                    inputs_segmentation=np.ones_like(inputs), targets_segmentation=(targets != 0).astype(np.int32))
+        targets[:, -1] = 0
+        target_segments = np.empty_like(inputs)
+        np.not_equal(targets, 0, out=target_segments)
+        return dict(inputs=inputs, targets=targets, inputs_position=self.positions, targets_position=self.positions,
+                    inputs_segmentation=self.input_segments, targets_segmentation=target_segments)
 
     def get_state(self):
         return json.dumps(dict(format=FORMAT, length=self.length, batch=self.batch,
@@ -182,8 +208,9 @@ class StreamingIterator:
 
 
 class StreamingDataset:
-    def __init__(self, config, training):
+    def __init__(self, config, training, tokenizer=None):
         self.config, self.training = config, training
+        self.tokenizer = tokenizer
         self.iterator = None
         self.eval_cache = []
 
@@ -191,7 +218,7 @@ class StreamingDataset:
         if not self.training and self.config.eval_steps > 0:
             return self.cached_eval()
         self.close()
-        iterator = StreamingIterator(self.config, self.training)
+        iterator = StreamingIterator(self.config, self.training, self.tokenizer)
         if self.training and self.config.load_full_state_path:
             previous = Path(self.config.load_full_state_path).parent / "iter/process_0-of-1.json"
             if not previous.exists():
@@ -205,7 +232,7 @@ class StreamingDataset:
         for index in range(self.config.eval_steps):
             if index == len(self.eval_cache):
                 if self.iterator is None:
-                    self.iterator = StreamingIterator(self.config, False)
+                    self.iterator = StreamingIterator(self.config, False, self.tokenizer)
                 self.eval_cache.append(next(self.iterator))
                 if len(self.eval_cache) == self.config.eval_steps:
                     self.iterator.close()
@@ -233,8 +260,11 @@ def install_streaming_input():
         import jax
         if jax.process_count() != 1:
             raise ValueError("This streaming pipeline uses one Python process")
-        train = MultiHostDataLoadIterator(StreamingDataset(config, True), mesh)
-        evaluation = MultiHostDataLoadIterator(StreamingDataset(config, False), mesh) if config.eval_interval > 0 else None
+        tokenizer = load_tokenizer(config.tokenizer_path, config.vocab_size)
+        train = MultiHostDataLoadIterator(StreamingDataset(config, True, tokenizer), mesh)
+        evaluation = None
+        if config.eval_interval > 0:
+            evaluation = MultiHostDataLoadIterator(StreamingDataset(config, False, tokenizer), mesh)
         return train, evaluation
     create._llm5_streaming = True
     interface.create_data_iterator = create

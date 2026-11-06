@@ -1,4 +1,5 @@
 """Background Hugging Face checkpoint uploads and full-state recovery."""
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 import json
@@ -35,7 +36,7 @@ class CheckpointHub:
         self.fingerprints["input_pipeline"] = manifest["input_pipeline"]
         self.api.create_repo(repo_id=repo, repo_type="model", private=True, exist_ok=True)
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="hf-checkpoint")
-        self.futures, self.queued = [], set()
+        self.futures, self.queued = deque(), set()
         self.assets_uploaded = False
         self.writers = []
         self.latest = None
@@ -55,12 +56,18 @@ class CheckpointHub:
 
     def snapshot_logs(self, destination):
         # Event files are append-only: copy flushed bytes, never hard-link them.
+        def ignore_local_profiles(directory, names):
+            if Path(directory).name == "plugins" and "profile" in names:
+                return ["profile"]
+            return []
+
         for writer in self.writers:
             writer.flush()
         for index, cfg in enumerate(self.configs):
             source = self.logdir(index)
             if source.exists():
-                shutil.copytree(source, destination / cfg["run_name"], dirs_exist_ok=True)
+                shutil.copytree(source, destination / cfg["run_name"], dirs_exist_ok=True,
+                                ignore=ignore_local_profiles)
 
     def restore_logs(self, latest):
         revision = latest.get("tensorboard_commit", latest["checkpoint_commit"])
@@ -106,9 +113,10 @@ class CheckpointHub:
             temporary.cleanup()
 
     def check(self):
-        for future in self.futures:
-            if future.done():
-                future.result()
+        # The single worker completes submissions in order.
+        while self.futures and self.futures[0].done():
+            self.futures[0].result()
+            self.futures.popleft()
 
     def wait(self):
         for future in self.futures:
