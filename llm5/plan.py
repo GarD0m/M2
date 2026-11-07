@@ -8,6 +8,15 @@ from pathlib import Path
 MAXTEXT_VERSION = "0.2.5"
 ROOT = Path(__file__).resolve().parents[1]
 CSA_HEAD_CHUNK_BUDGET = 128 * 1024**2
+LOGITS_TILE_ALIGNMENT = 128
+
+
+def aligned_logits_tiles(tokens, limit):
+    """Choose the largest tile count within the limit that divides aligned tokens."""
+    if not tokens or tokens % LOGITS_TILE_ALIGNMENT:
+        return math.gcd(tokens, limit)
+    blocks = tokens // LOGITS_TILE_ALIGNMENT
+    return next(tiles for tiles in range(min(limit, blocks), 0, -1) if blocks % tiles == 0)
 
 
 def read_json(path):
@@ -68,17 +77,18 @@ def memory_components(model, stage):
     """Named tensor sizes only; excludes optimizer workspace, remat and XLA temporaries."""
     params = parameter_count(model)
     tokens = stage["per_device_microbatch"] * stage["length"]
+    tiles = aligned_logits_tiles(tokens, model["num_vocab_tiling"])
     q = model["base_num_query_heads"] * model["head_dim"]
     kv = model["base_num_kv_heads"] * model["head_dim"]
     gib = 1024**3
     if params is None:
-        return {"one_fp32_logits_tile_gib": tokens*model["vocab_size"]*4/model["num_vocab_tiling"]/gib}
+        return {"one_fp32_logits_tile_gib": tokens*model["vocab_size"]*4/tiles/gib}
     return {
         "bf16_weights_gib": params*2/gib,
         "fp32_gradient_buffer_gib": params*4/gib,
         "saved_qkv_gib": model["base_num_decoder_layers"]*tokens*(q+2*kv)*2/gib,
         "layer_inputs_gib": model["base_num_decoder_layers"]*tokens*model["base_emb_dim"]*2/gib,
-        "one_fp32_logits_tile_gib": tokens*model["vocab_size"]*4/model["num_vocab_tiling"]/gib,
+        "one_fp32_logits_tile_gib": tokens*model["vocab_size"]*4/tiles/gib,
     }
 
 

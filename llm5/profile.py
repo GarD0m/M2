@@ -8,7 +8,7 @@ from tempfile import TemporaryDirectory
 from uuid import uuid4
 
 from llm5 import launch, streaming
-from llm5.plan import generate, read_json
+from llm5.plan import aligned_logits_tiles, generate, read_json
 from llm5.train import configure_tpu, run_training_config
 
 
@@ -21,7 +21,12 @@ def main(argv=None):
     parser.add_argument("--profile-steps", type=int, default=4, help="Optimizer steps to trace")
     parser.add_argument("--vocab-tiles", type=int, default=16, help="Maximum number of vocabulary loss tiles")
     parser.add_argument("--csa-head-chunk", type=int, help="CSA teacher heads per chunk (default: automatic)")
+    parser.add_argument("--native-csa-mask", action="store_true", help="Use MaxText's CSA validity gather as a baseline")
     parser.add_argument("--indexer-topk", type=int, default=32, help="CSA compressed blocks selected per token")
+    parser.add_argument("--moe-save", choices=("none", "sorted-input", "up-projections"), default="none",
+                        help="Keep selected MoE activations on device across the backward pass")
+    parser.add_argument("--splash-bwd-kv-block", type=int, choices=(128, 256, 512),
+                        help="Tokamax Splash backward KV block and compute block size")
     parser.add_argument("--mhc-lite", action="store_true", help="Test mHC-lite with its fused TPU Pallas kernel")
     parser.add_argument("--fp32-logits-dot", action="store_true", help="Use FP32 instead of BF16 logits projection output")
     parser.add_argument("--aggressive", action="store_true", help="Enable fused mHC-lite alongside the default optimizations")
@@ -79,6 +84,13 @@ def main(argv=None):
                    skip_first_n_steps_for_profiler=args.warmup_steps, profiler_steps=args.profile_steps,
                    enable_checkpointing=False, save_checkpoint_on_completion=False,
                    eval_interval=-1, load_full_state_path="")
+        if args.moe_save == "sorted-input":
+            cfg["moe_x_sorted"] = "device"
+        elif args.moe_save == "up-projections":
+            cfg.update(moe_mlpwi_0="device", moe_mlpwi_1="device")
+        if args.splash_bwd_kv_block is not None:
+            cfg.update(sa_block_kv_dkv=args.splash_bwd_kv_block,
+                       sa_block_kv_dkv_compute=args.splash_bwd_kv_block)
         if args.csa_head_chunk is not None:
             heads = (cfg["base_num_query_heads"], cfg["indexer_n_heads"])
             if any(n % args.csa_head_chunk for n in heads):
@@ -88,11 +100,16 @@ def main(argv=None):
         launch.check_data(stage, cfg, validate_tokenizer=True)
         output_dir = Path(cfg["base_output_directory"]) / cfg["run_name"]
         output_dir.mkdir(parents=True, exist_ok=True)
+        effective_tiles = aligned_logits_tiles(args.length * stage["per_device_microbatch"], args.vocab_tiles)
         metadata = {"length": args.length, "global_microbatch": args.microbatch, "ga": args.ga,
                     "device_count": device_count, "warmup_steps": args.warmup_steps,
                     "profile_steps": args.profile_steps, "vocab_tiles": args.vocab_tiles,
+                    "effective_vocab_tiles": effective_tiles,
                     "csa_head_chunk": cfg["csa_qk_head_chunk_size"],
+                    "native_csa_mask": args.native_csa_mask,
                     "indexer_topk": args.indexer_topk,
+                    "moe_save": args.moe_save,
+                    "splash_bwd_kv_block": cfg.get("sa_block_kv_dkv", 512),
                     "mhc_lite_pallas": args.mhc_lite,
                     "logits_dot_in_fp32": args.fp32_logits_dot,
                     "math": args.math, "code": args.code}
@@ -100,12 +117,12 @@ def main(argv=None):
         print(f"Profiling: length={stage['length']}, "
               f"global microbatch={stage['microbatch']}, GA={stage['accumulation']}, "
               f"warmup={args.warmup_steps}, profile steps={args.profile_steps}, "
-              f"vocab tiles={args.vocab_tiles}, CSA head chunk={cfg['csa_qk_head_chunk_size']}, "
+              f"vocab tiles={effective_tiles}/{args.vocab_tiles}, CSA head chunk={cfg['csa_qk_head_chunk_size']}, "
               f"indexer top-k={args.indexer_topk}, mHC-lite Pallas={args.mhc_lite}, "
               f"FP32 logits dot={args.fp32_logits_dot}", flush=True)
         print(f"TensorBoard logdir: {cfg['base_output_directory']}/{cfg['run_name']}/tensorboard", flush=True)
         print(f"HLO dump: {Path(hlo_dir).resolve()}", flush=True)
-        run_training_config(config_path, record_metrics=False)
+        run_training_config(config_path, record_metrics=False, native_csa_mask=args.native_csa_mask)
 
 
 if __name__ == "__main__":

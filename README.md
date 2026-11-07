@@ -25,9 +25,9 @@ os.environ["JAX_PLATFORMS"] = "tpu"
 os.environ["JAX_COMPILATION_CACHE_DIR"] = "/content/jax-cache"
 ```
 
-自訂 remat 在 TPU 上保留 Q/KV projections 和 MoE top-k 路由索引。MoE 反向重用排序索引，router 梯度採用 MaxText 的 dense VJP。模型參數與 optimizer state 也留在 TPU。單裝置下，CSA teacher 在 1K／2K 分別以 4／2 heads 為一組，4K 起每組 1 head。訓練的 logits 最多分成 16 塊；單裝置每 microbatch 32768 tokens 時，每塊為 2048 tokens，單一 FP32 logits 張量為 512 MiB。實際分塊數依 token 數對齊，驗證依 batch 縮減分塊數，維持 128 tokens 對齊。mHC RMSNorm 和 HyperHead 的大型運算元使用 BF16，歸約保留 FP32。
+自訂 remat 在 TPU 上保留 Q/KV projections 和 MoE top-k 路由索引。MoE 反向重用排序索引，前後向 gather 使用已知在範圍內的索引，router 梯度採用 MaxText 的 dense VJP。模型參數與 optimizer state 也留在 TPU。單裝置下，CSA teacher 在 1K／2K 分別以 4／2 heads 為一組，4K 起每組 1 head。訓練的 logits 最多分成 16 塊；單裝置每 microbatch 32768 tokens 時，每塊為 2048 tokens，單一 FP32 logits 張量為 512 MiB。分塊按每個 data shard 的 token 數選擇，優先讓每塊對齊 128 tokens；驗證依 batch 縮減分塊數。mHC RMSNorm 和 HyperHead 的大型運算元使用 BF16，歸約保留 FP32。
 
-CSA indexer 每個 token 最多選取 32 個壓縮區塊，減少 trace 中耗時的 mask gather；這比原先的 64 更稀疏，會改變注意力與訓練結果。logits 投影改用 BF16 輸出，交叉熵仍轉為 FP32 計算；精度、吞吐、MFU 和品質影響需在 TPU 上驗證。
+CSA indexer 每個 token 最多選取 32 個壓縮區塊。無 cache 的 StreamIndex 訓練路徑沿用原有 top-k 排序，直接在區塊順序中套用 causal 與 segment 限制，省去逐列擷取 top-k 有效性。logits 投影使用 BF16 輸出，交叉熵仍轉為 FP32 計算。
 
 mHC 的 Sinkhorn 使用 10 次迭代，保留 FP32 正規化。
 
@@ -82,6 +82,10 @@ TensorBoard 只寫入訓練 loss、整次驗證的平均 loss、學習率和每�
 使用相同的 `--length`、`--microbatch` 和 `--ga`，分別執行 `--vocab-tiles 16` 與 `--vocab-tiles 32` 才能比較分塊的影響。16 塊的 logits 張量可能需要兩倍記憶體。可用 `--indexer-topk 32`、`64` 和 `128` 比較 CSA 稀疏度；用 `--fp32-logits-dot` 比較 FP32 投影輸出；用 `--csa-head-chunk` 測試 CSA teacher 的分塊大小。每次 profiler 都會將配置寫入測試目錄的 `profile-config.json`，每次執行都需使用新的 runtime。
 
 可加入 `--aggressive`（或 `--mhc-lite`），在獨立 profiler 同時測試 MaxText 的 mHC-lite TPU Pallas 融合算子、top-k 32 和 BF16 logits 投影。mHC-lite 使用不同的殘差映射和參數形狀，不能直接沿用目前的訓練 checkpoint；此選項只用於 profiler。現有 1K／microbatch 32 trace 中，mHC-lite 約 14.79 秒／步，原 mHC 約 15.14 秒／步；這兩次皆為 top-k 64、FP32 logits 投影。
+
+隨附的 1K／microbatch 32／GA 16 舊 trace 中，CSA 有效性 gather 在 top-k 128、64、32 時，分別約耗 1.62、0.81、0.41 秒／步。最後一筆 trace 的 14.12 秒／步同時使用 mHC-lite、top-k 32 與 BF16 logits，無法單獨歸因於其中一項。HLO live-range 顯示原 mHC 的記憶體峰值中，重算的 MoE GMM 和 mHC 正規化各佔 1.50 GiB，Splash 反向工作區約 408 MiB。
+
+以同一組 profiler 參數各執行一次，第二次加上 `--native-csa-mask`，即可比較新版 CSA 遮罩與原有 gather。可另用 `--moe-save sorted-input` 或 `--moe-save up-projections` 分別比較保留 MoE 排序輸入或上投影的記憶體與重算成本。用 `--splash-bwd-kv-block 128` 或 `256` 和預設的 `512` 比較 Splash 反向 KV tile。這些選項會記錄到 `profile-config.json`。新路徑的 TPU 耗時與記憶體仍需實測。
 
 程式會印出本次 TensorBoard logdir，位於 `runs/profiles/<測試識別碼>/tensorboard`；XProf trace 位於該目錄的 `plugins/profile/`，編譯時的 HLO 文字與 protobuf dump 則位於同一測試目錄的 `hlo/`。在 Colab 安裝 `xprof`（`%pip install xprof`），以該 logdir 開啟 XProf 的 **Trace Viewer** 等工具，分析主機、TPU kernel 與運算時間；HLO 檔案可另用於檢查編譯結果。測試仍會執行 loss 與梯度計算，但不將訓練指標寫入 TensorBoard。檔案留在 Colab runtime 本機，HLO dump 可能佔用大量空間。
 

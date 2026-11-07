@@ -420,14 +420,18 @@ def install_moe_route_reuse(moe):
     def route_forward(inputs, selected_experts):
         top_k = selected_experts.size // inputs.shape[0]
         permutation = checkpoint_name(jnp.argsort(selected_experts.reshape(-1)), "moe_routing_maps")
-        return inputs[permutation // top_k], permutation.reshape(inputs.shape[0], top_k)
+        sorted_inputs = inputs.at[permutation // top_k].get(
+            mode="promise_in_bounds", wrap_negative_indices=False
+        )
+        return sorted_inputs, permutation.reshape(inputs.shape[0], top_k)
 
     @jax.custom_vjp
     def route(inputs, selected_experts):
         return route_forward(inputs, selected_experts)[0]
 
     def route_backward(permutation, gradient):
-        ordered = gradient[jnp.argsort(permutation.reshape(-1))]
+        inverse = jnp.argsort(permutation.reshape(-1))
+        ordered = gradient.at[inverse].get(mode="promise_in_bounds", wrap_negative_indices=False)
         return ordered.reshape(permutation.shape + gradient.shape[1:]).sum(axis=1), None
 
     route.defvjp(route_forward, route_backward)
@@ -444,35 +448,40 @@ def install_moe_route_reuse(moe):
 
 def install_aligned_logits_tiles(trainer):
     from maxtext.configs.pyconfig import HyperParameters
+    from llm5.plan import aligned_logits_tiles
 
     native = trainer.vocab_tiling_nnx_loss
-    if getattr(native, "_llm5_hyperparameter_logits_tiles", False):
+    if getattr(native, "_llm5_per_device_logits_tiles", False):
         return
-    if getattr(native, "_llm5_aligned_logits_tiles", False):
+    if (getattr(native, "_llm5_hyperparameter_logits_tiles", False)
+            or getattr(native, "_llm5_aligned_logits_tiles", False)):
         native = native.__wrapped__
 
     @wraps(native)
     def loss(model, hidden_states, data, config, is_train):
         tokens = math.prod(hidden_states.shape[:-1])
-        if tokens % 128 == 0:
-            tile_limit = config.num_vocab_tiling
-            if not is_train and config.decoder_block == "deepseek4":
+        tile_limit = config.num_vocab_tiling
+        if config.decoder_block == "deepseek4":
+            data_shards = max(1, config.ici_data_parallelism) * max(1, config.dcn_data_parallelism)
+            if tokens % data_shards == 0:
+                tokens //= data_shards
+            if not is_train:
                 eval_ratio = min(1, config.eval_per_device_batch_size / config.per_device_batch_size)
                 tile_limit = max(1, math.ceil(tile_limit * eval_ratio))
-            tiles = math.gcd(tile_limit, tokens // 128)
-            if tiles != config.num_vocab_tiling:
-                update = {"num_vocab_tiling": tiles}
-                if isinstance(config, HyperParameters):
-                    config = HyperParameters(config._pydantic_config.model_copy(update=update))
-                else:
-                    config = config.model_copy(update=update)
+        tiles = aligned_logits_tiles(tokens, tile_limit)
+        if tiles != config.num_vocab_tiling:
+            update = {"num_vocab_tiling": tiles}
+            if isinstance(config, HyperParameters):
+                config = HyperParameters(config._pydantic_config.model_copy(update=update))
+            else:
+                config = config.model_copy(update=update)
         return native(model, hidden_states, data, config, is_train)
 
-    loss._llm5_hyperparameter_logits_tiles = True
+    loss._llm5_per_device_logits_tiles = True
     trainer.vocab_tiling_nnx_loss = loss
 
 
-def load_trainer():
+def load_trainer(native_csa_mask=False):
     configure_tpu()
     load_maxtext_conversion_configs()
     install_checkpoint_manager_compat()
@@ -482,6 +491,8 @@ def load_trainer():
     install_fused_qkv_muon_support()
     install_metric_diagnostics()
     install_deepseek4_support()
+    from llm5.csa import install_streamindex_mask
+    install_streamindex_mask(enabled=not native_csa_mask)
     from maxtext.trainers.pre_train import train
     install_aligned_logits_tiles(train)
     return train
@@ -494,7 +505,8 @@ def main():
     app.run(train.main)
 
 
-def run_training_config(config_path, start_step=0, checkpoint_hub=None, overrides=(), record_metrics=True):
+def run_training_config(config_path, start_step=0, checkpoint_hub=None, overrides=(), record_metrics=True,
+                        native_csa_mask=False):
     """Run MaxText directly in the caller's process; preserve native exceptions."""
     global _TRAINING_PROGRESS
     config = json.loads(Path(config_path).read_text(encoding="utf-8"))
@@ -507,7 +519,7 @@ def run_training_config(config_path, start_step=0, checkpoint_hub=None, override
         metric_writer = None
         try:
             from absl import flags
-            train = load_trainer()
+            train = load_trainer(native_csa_mask=native_csa_mask)
             if not record_metrics:
                 from maxtext.common import metric_logger
                 metric_writer = metric_logger.MetricLogger.write_metrics_to_tensorboard
