@@ -25,7 +25,7 @@ os.environ["JAX_PLATFORMS"] = "tpu"
 os.environ["JAX_COMPILATION_CACHE_DIR"] = "/content/jax-cache"
 ```
 
-自訂 remat 在 TPU 上保留 Q/KV projections 和 MoE top-k 路由索引。MoE 反向重用排序索引，router 梯度採用 MaxText 的 dense VJP。模型參數與 optimizer state 也留在 TPU。單裝置下，CSA teacher 在 1K／2K 分別以 4／2 heads 為一組，4K 起每組 1 head。訓練的 logits 最多分成 16 塊；單裝置每 microbatch 32768 tokens 時，每塊為 2048 tokens，單一 FP32 logits 張量為 512 MiB。實際分塊數依 token 數對齊，驗證依 batch 縮減分塊數，維持 128 tokens 對齊。mHC RMSNorm 和 HyperHead 的大型運算元使用 BF16，歸約保留 FP32。
+自訂 remat 在 TPU 上保留 Q/KV projections 和 MoE top-k 路由索引。MoE 反向重用排序索引，router 梯度採用 MaxText 的 dense VJP。模型參數與 optimizer state 也留在 TPU。單裝置下，CSA teacher 在 1K／2K 分別以 4／2 heads 為一組，4K 起每組 1 head。訓練的 logits 最多分成 32 塊；單裝置每 microbatch 32768 tokens 時，每塊為 1024 tokens，單一 FP32 logits 張量為 256 MiB。實際分塊數依 token 數對齊，驗證依 batch 縮減分塊數，維持 128 tokens 對齊。mHC RMSNorm 和 HyperHead 的大型運算元使用 BF16，歸約保留 FP32。
 
 mHC 的 Sinkhorn 使用 10 次迭代，保留 FP32 正規化。
 
@@ -77,7 +77,7 @@ TensorBoard 只寫入訓練 loss、整次驗證的平均 loss、學習率和每�
 
 測試只執行一組由 CLI 指定的配置，不讀取 curriculum；`microbatch` 是全域 sequence 數，須能被 TPU 裝置數整除。預設長度 1024、microbatch 32、GA 16；可用 `--math` 和 `--code` 指定資料比例，預設為 0.05 和 0.15。模型和資料來源仍沿用訓練設定。`--warmup-steps` 指定擷取前跳過的 optimizer steps（預設 1，可設 0），`--profile-steps` 指定擷取步數（預設 4，至少 1）；總共執行兩者相加再多 1 步，以完成 trace。每次測試使用新的本機目錄，不讀取或儲存訓練 checkpoint，也不上傳 Hub。正式訓練仍使用 `llm5.start`。
 
-依現有 1K trace，詞彙輸出層的分塊 forward 和 backward 約占每步 4.1 秒（每步約 16.2 秒）。計畫改用最多 16 塊來減少迴圈與權重讀取；這會增加單塊 logits 記憶體，尚需在目標 TPU 上比較速度與峰值記憶體。可分別執行 `--vocab-tiles 16` 與 `--vocab-tiles 32` 比較；每次都需使用新的 runtime。
+使用相同的 `--length`、`--microbatch` 和 `--ga`，分別執行 `--vocab-tiles 16` 與 `--vocab-tiles 32` 才能比較分塊的影響。16 塊的 logits 張量可能需要兩倍記憶體。可用 `--csa-head-chunk` 測試 CSA teacher 的分塊大小；預設沿用訓練計畫的自動設定。每次 profiler 都會將配置寫入測試目錄的 `profile-config.json`，每次執行都需使用新的 runtime。
 
 程式會印出本次 TensorBoard logdir，位於 `runs/profiles/<測試識別碼>/tensorboard`；XProf trace 位於該目錄的 `plugins/profile/`，編譯時的 HLO 文字與 protobuf dump 則位於同一測試目錄的 `hlo/`。在 Colab 安裝 `xprof`（`%pip install xprof`），以該 logdir 開啟 XProf 的 **Trace Viewer** 等工具，分析主機、TPU kernel 與運算時間；HLO 檔案可另用於檢查編譯結果。測試仍會執行 loss 與梯度計算，但不將訓練指標寫入 TensorBoard。檔案留在 Colab runtime 本機，HLO dump 可能佔用大量空間。
 

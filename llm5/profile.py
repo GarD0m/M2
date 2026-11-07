@@ -19,7 +19,8 @@ def main(argv=None):
     parser.add_argument("--ga", type=int, default=16, help="Gradient accumulation steps")
     parser.add_argument("--warmup-steps", type=int, default=1, help="Optimizer steps to skip before tracing")
     parser.add_argument("--profile-steps", type=int, default=4, help="Optimizer steps to trace")
-    parser.add_argument("--vocab-tiles", type=int, default=16, help="Maximum number of vocabulary loss tiles")
+    parser.add_argument("--vocab-tiles", type=int, default=32, help="Maximum number of vocabulary loss tiles")
+    parser.add_argument("--csa-head-chunk", type=int, help="CSA teacher heads per chunk (default: automatic)")
     parser.add_argument("--math", type=float, default=0.05, help="Math data fraction")
     parser.add_argument("--code", type=float, default=0.15, help="Code data fraction")
     args = parser.parse_args(argv)
@@ -27,6 +28,8 @@ def main(argv=None):
         parser.error("length must be at least 2; microbatch and GA must be positive")
     if args.warmup_steps < 0 or args.profile_steps < 1 or args.vocab_tiles < 1:
         parser.error("warmup steps must be nonnegative; profile steps and vocab tiles must be positive")
+    if args.csa_head_chunk is not None and args.csa_head_chunk < 1:
+        parser.error("CSA head chunk must be positive")
     if not (0 <= args.math <= 1 and 0 <= args.code <= 1 - args.math):
         parser.error("math and code fractions must be nonnegative and sum to at most 1")
     # XLA reads its flags when the backend starts. Do this before querying devices.
@@ -66,12 +69,25 @@ def main(argv=None):
                    skip_first_n_steps_for_profiler=args.warmup_steps, profiler_steps=args.profile_steps,
                    enable_checkpointing=False, save_checkpoint_on_completion=False,
                    eval_interval=-1, load_full_state_path="")
+        if args.csa_head_chunk is not None:
+            heads = (cfg["base_num_query_heads"], cfg["indexer_n_heads"])
+            if any(n % args.csa_head_chunk for n in heads):
+                parser.error("CSA head chunk must divide both query and indexer head counts")
+            cfg["csa_qk_head_chunk_size"] = args.csa_head_chunk
         config_path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
         launch.check_data(stage, cfg, validate_tokenizer=True)
+        output_dir = Path(cfg["base_output_directory"]) / cfg["run_name"]
+        output_dir.mkdir(parents=True, exist_ok=True)
+        metadata = {"length": args.length, "global_microbatch": args.microbatch, "ga": args.ga,
+                    "device_count": device_count, "warmup_steps": args.warmup_steps,
+                    "profile_steps": args.profile_steps, "vocab_tiles": args.vocab_tiles,
+                    "csa_head_chunk": cfg["csa_qk_head_chunk_size"],
+                    "math": args.math, "code": args.code}
+        (output_dir / "profile-config.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
         print(f"Profiling: length={stage['length']}, "
               f"global microbatch={stage['microbatch']}, GA={stage['accumulation']}, "
               f"warmup={args.warmup_steps}, profile steps={args.profile_steps}, "
-              f"vocab tiles={args.vocab_tiles}", flush=True)
+              f"vocab tiles={args.vocab_tiles}, CSA head chunk={cfg['csa_qk_head_chunk_size']}", flush=True)
         print(f"TensorBoard logdir: {cfg['base_output_directory']}/{cfg['run_name']}/tensorboard", flush=True)
         print(f"HLO dump: {Path(hlo_dir).resolve()}", flush=True)
         run_training_config(config_path, record_metrics=False)
