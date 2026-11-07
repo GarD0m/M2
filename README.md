@@ -81,6 +81,8 @@ TensorBoard 只寫入訓練 loss、整次驗證的平均 loss、學習率和每�
 
 使用相同的 `--length`、`--microbatch` 和 `--ga`，分別執行 `--vocab-tiles 16` 與 `--vocab-tiles 32` 才能比較分塊的影響。16 塊的 logits 張量可能需要兩倍記憶體。可用 `--indexer-topk 64` 和 `--indexer-topk 128` 比較 CSA 稀疏度；可用 `--csa-head-chunk` 測試 CSA teacher 的分塊大小，預設沿用訓練計畫的自動設定。每次 profiler 都會將配置寫入測試目錄的 `profile-config.json`，每次執行都需使用新的 runtime。
 
+可加入 `--mhc-lite`，在獨立 profiler 測試 MaxText 的 mHC-lite TPU Pallas 融合算子，並與不加此參數的 trace 比較。mHC-lite 使用不同的殘差映射和參數形狀，不能直接沿用目前的訓練 checkpoint；此選項目前只用於 profiler，尚未確認速度或記憶體效果。
+
 程式會印出本次 TensorBoard logdir，位於 `runs/profiles/<測試識別碼>/tensorboard`；XProf trace 位於該目錄的 `plugins/profile/`，編譯時的 HLO 文字與 protobuf dump 則位於同一測試目錄的 `hlo/`。在 Colab 安裝 `xprof`（`%pip install xprof`），以該 logdir 開啟 XProf 的 **Trace Viewer** 等工具，分析主機、TPU kernel 與運算時間；HLO 檔案可另用於檢查編譯結果。測試仍會執行 loss 與梯度計算，但不將訓練指標寫入 TensorBoard。檔案留在 Colab runtime 本機，HLO dump 可能佔用大量空間。
 
 HLO dump 的 XLA 設定必須在 JAX 後端初始化前生效。請在新的 Colab runtime 執行 profiler；每次重新執行 profiler 或切換回正式訓練前，也請重新啟動 runtime。Profiler 會停用該程序的 JAX 編譯快取以確保重新編譯，並保留原有的 `XLA_FLAGS`；若其中已設定 `--xla_dump_to`，需先移除該項。
