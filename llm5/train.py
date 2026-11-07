@@ -340,6 +340,35 @@ def install_mhc_low_memory():
     mhc.RMSNorm = MhcRMSNorm
 
 
+def install_mhc_pallas_tracer_compat():
+    """Allow permutation arrays to be traced through the mHC Pallas VJP."""
+    import jax
+    from maxtext.kernels.mhc import mhc_kernels_fwd, mhc_kernels_bwd
+
+    if getattr(mhc_kernels_fwd._pre_op, "_llm5_tracer_compat", False):
+        return
+
+    @partial(jax.custom_vjp, nondiff_argnums=(0,))
+    def pre_op(config, x, permutations, weights):
+        (layer_input, context), _ = mhc_kernels_fwd.pre_fwd(x, weights, permutations, config)
+        return layer_input, context
+
+    def forward(config, x, permutations, weights):
+        output, saved = mhc_kernels_fwd.pre_fwd(x, weights, permutations, config)
+        return output, (saved, x, permutations, weights)
+
+    def backward(config, residuals, cotangents):
+        saved, x, permutations, weights = residuals
+        dx, dweights = mhc_kernels_bwd.pre_op_bwd(
+            config, permutations, (saved, (x, weights)), cotangents
+        )
+        return dx, None, dweights
+
+    pre_op.defvjp(forward, backward)
+    pre_op._llm5_tracer_compat = True
+    mhc_kernels_fwd._pre_op = pre_op
+
+
 def install_deepseek4_support():
     from types import SimpleNamespace
     from flax import nnx
@@ -347,6 +376,7 @@ def install_deepseek4_support():
     from maxtext.models import deepseek4
 
     install_mhc_low_memory()
+    install_mhc_pallas_tracer_compat()
     install_moe_route_reuse(moe)
     decoder = nnx_decoders.NNXDecoder
     native = decoder._apply_deepseek4_scanned_blocks
