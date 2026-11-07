@@ -1,6 +1,7 @@
 """Capture one short, isolated trace with a CLI-selected configuration."""
 import argparse
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -18,22 +19,36 @@ def main(argv=None):
     parser.add_argument("--ga", type=int, default=16, help="Gradient accumulation steps")
     parser.add_argument("--warmup-steps", type=int, default=1, help="Optimizer steps to skip before tracing")
     parser.add_argument("--profile-steps", type=int, default=4, help="Optimizer steps to trace")
+    parser.add_argument("--vocab-tiles", type=int, default=16, help="Maximum number of vocabulary loss tiles")
     parser.add_argument("--math", type=float, default=0.05, help="Math data fraction")
     parser.add_argument("--code", type=float, default=0.15, help="Code data fraction")
     args = parser.parse_args(argv)
     if args.length < 2 or args.microbatch < 1 or args.ga < 1:
         parser.error("length must be at least 2; microbatch and GA must be positive")
-    if args.warmup_steps < 0 or args.profile_steps < 1:
-        parser.error("warmup steps must be nonnegative and profile steps must be positive")
+    if args.warmup_steps < 0 or args.profile_steps < 1 or args.vocab_tiles < 1:
+        parser.error("warmup steps must be nonnegative; profile steps and vocab tiles must be positive")
     if not (0 <= args.math <= 1 and 0 <= args.code <= 1 - args.math):
         parser.error("math and code fractions must be nonnegative and sum to at most 1")
+    # XLA reads its flags when the backend starts. Do this before querying devices.
+    import jax
+    from jax._src import xla_bridge
+    if xla_bridge.backends_are_initialized():
+        parser.error("JAX is already initialized; restart the kernel before profiling")
+    flags = os.environ.get("XLA_FLAGS", "")
+    if "--xla_dump_to" in flags:
+        parser.error("remove the existing --xla_dump_to from XLA_FLAGS before profiling")
+    run_id = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid4().hex[:8]
+    hlo_dir = f"runs/profiles/{run_id}-test/hlo"
+    os.environ["XLA_FLAGS"] = (f"{flags} --xla_dump_to={hlo_dir} "
+                               "--xla_dump_hlo_as_text --xla_dump_hlo_as_proto").strip()
+    # A cache hit can bypass compilation and leave no HLO dump.
+    jax.config.update("jax_enable_compilation_cache", False)
     configure_tpu()
     streaming.configure(train_weights=[1 - args.math - args.code, args.math, args.code])
     device_count = launch.check_runtime()
     if args.microbatch % device_count:
         parser.error("global microbatch must be divisible by the TPU device count")
     # A fresh directory prevents MaxText from restoring or overwriting a training run.
-    run_id = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid4().hex[:8]
     steps = args.warmup_steps + args.profile_steps + 1
     budget = (args.length - 1) * args.microbatch * args.ga * max(100, steps + 1)
     curriculum = {"seed": 42, "warmup_steps": 64, "target_tokens": budget,
@@ -47,6 +62,7 @@ def main(argv=None):
         config_path = Path(stage["config"])
         cfg = read_json(config_path)
         cfg.update(steps=steps, profiler="xplane", profile_cleanly=True,
+                   num_vocab_tiling=args.vocab_tiles,
                    skip_first_n_steps_for_profiler=args.warmup_steps, profiler_steps=args.profile_steps,
                    enable_checkpointing=False, save_checkpoint_on_completion=False,
                    eval_interval=-1, load_full_state_path="")
@@ -54,9 +70,11 @@ def main(argv=None):
         launch.check_data(stage, cfg, validate_tokenizer=True)
         print(f"Profiling: length={stage['length']}, "
               f"global microbatch={stage['microbatch']}, GA={stage['accumulation']}, "
-              f"warmup={args.warmup_steps}, profile steps={args.profile_steps}", flush=True)
+              f"warmup={args.warmup_steps}, profile steps={args.profile_steps}, "
+              f"vocab tiles={args.vocab_tiles}", flush=True)
         print(f"TensorBoard logdir: {cfg['base_output_directory']}/{cfg['run_name']}/tensorboard", flush=True)
-        run_training_config(config_path)
+        print(f"HLO dump: {Path(hlo_dir).resolve()}", flush=True)
+        run_training_config(config_path, record_metrics=False)
 
 
 if __name__ == "__main__":

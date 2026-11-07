@@ -79,9 +79,9 @@ def update_training_progress(metrics, step, metric_type):
         state["initialized"] = True
     scalars = metrics.get("scalar", {})
     values = {}
-    if "learning/loss" in scalars:
+    if state.get("show_metrics", True) and "learning/loss" in scalars:
         values["loss"] = f"{float(scalars['learning/loss']):.4f}"
-    if "learning/current_learning_rate" in scalars:
+    if state.get("show_metrics", True) and "learning/current_learning_rate" in scalars:
         values["lr"] = f"{float(scalars['learning/current_learning_rate']):.2e}"
     progress.set_postfix(values, refresh=False)
     completed = min(progress.total, max(0, int(step)+1-state["start_step"]))
@@ -464,22 +464,31 @@ def main():
     app.run(train.main)
 
 
-def run_training_config(config_path, start_step=0, checkpoint_hub=None, overrides=()):
+def run_training_config(config_path, start_step=0, checkpoint_hub=None, overrides=(), record_metrics=True):
     """Run MaxText directly in the caller's process; preserve native exceptions."""
     global _TRAINING_PROGRESS
     config = json.loads(Path(config_path).read_text(encoding="utf-8"))
     previous = _TRAINING_PROGRESS
     with tqdm(total=config["steps"]-start_step, desc=config["run_name"], unit="step", mininterval=1.0,
               position=0, leave=False, dynamic_ncols=True) as progress:
-        _TRAINING_PROGRESS = {"bar": progress, "start_step": start_step, "initialized": False}
+        _TRAINING_PROGRESS = {"bar": progress, "start_step": start_step, "initialized": False,
+                              "show_metrics": record_metrics}
+        metric_logger = None
+        metric_writer = None
         try:
             from absl import flags
             train = load_trainer()
+            if not record_metrics:
+                from maxtext.common import metric_logger
+                metric_writer = metric_logger.MetricLogger.write_metrics_to_tensorboard
+                metric_logger.MetricLogger.write_metrics_to_tensorboard = lambda *args, **kwargs: None
             if not flags.FLAGS.is_parsed():
                 flags.FLAGS(["llm5"])
             with checkpoint_hub.capture() if checkpoint_hub is not None else nullcontext():
                 return train.main(["llm5.train", str(config_path), *overrides])
         finally:
+            if metric_logger is not None and metric_writer is not None:
+                metric_logger.MetricLogger.write_metrics_to_tensorboard = metric_writer
             _TRAINING_PROGRESS = previous
 
 
