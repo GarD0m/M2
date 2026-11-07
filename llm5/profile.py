@@ -19,7 +19,7 @@ def main(argv=None):
     parser.add_argument("--ga", type=int, default=16, help="Gradient accumulation steps")
     parser.add_argument("--warmup-steps", type=int, default=1, help="Optimizer steps to skip before tracing")
     parser.add_argument("--profile-steps", type=int, default=4, help="Optimizer steps to trace")
-    parser.add_argument("--vocab-tiles", type=int, default=32, help="Maximum number of vocabulary loss tiles")
+    parser.add_argument("--vocab-tiles", type=int, default=16, help="Maximum number of vocabulary loss tiles")
     parser.add_argument("--csa-head-chunk", type=int, help="CSA teacher heads per chunk (default: automatic)")
     parser.add_argument("--math", type=float, default=0.05, help="Math data fraction")
     parser.add_argument("--code", type=float, default=0.15, help="Code data fraction")

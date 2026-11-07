@@ -25,7 +25,7 @@ os.environ["JAX_PLATFORMS"] = "tpu"
 os.environ["JAX_COMPILATION_CACHE_DIR"] = "/content/jax-cache"
 ```
 
-自訂 remat 在 TPU 上保留 Q/KV projections 和 MoE top-k 路由索引。MoE 反向重用排序索引，router 梯度採用 MaxText 的 dense VJP。模型參數與 optimizer state 也留在 TPU。單裝置下，CSA teacher 在 1K／2K 分別以 4／2 heads 為一組，4K 起每組 1 head。訓練的 logits 最多分成 32 塊；單裝置每 microbatch 32768 tokens 時，每塊為 1024 tokens，單一 FP32 logits 張量為 256 MiB。實際分塊數依 token 數對齊，驗證依 batch 縮減分塊數，維持 128 tokens 對齊。mHC RMSNorm 和 HyperHead 的大型運算元使用 BF16，歸約保留 FP32。
+自訂 remat 在 TPU 上保留 Q/KV projections 和 MoE top-k 路由索引。MoE 反向重用排序索引，router 梯度採用 MaxText 的 dense VJP。模型參數與 optimizer state 也留在 TPU。單裝置下，CSA teacher 在 1K／2K 分別以 4／2 heads 為一組，4K 起每組 1 head。訓練的 logits 最多分成 16 塊；單裝置每 microbatch 32768 tokens 時，每塊為 2048 tokens，單一 FP32 logits 張量為 512 MiB。實際分塊數依 token 數對齊，驗證依 batch 縮減分塊數，維持 128 tokens 對齊。mHC RMSNorm 和 HyperHead 的大型運算元使用 BF16，歸約保留 FP32。
 
 mHC 的 Sinkhorn 使用 10 次迭代，保留 FP32 正規化。
 
