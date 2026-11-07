@@ -21,11 +21,14 @@ def main(argv=None):
     parser.add_argument("--profile-steps", type=int, default=4, help="Optimizer steps to trace")
     parser.add_argument("--vocab-tiles", type=int, default=16, help="Maximum number of vocabulary loss tiles")
     parser.add_argument("--csa-head-chunk", type=int, help="CSA teacher heads per chunk (default: automatic)")
-    parser.add_argument("--indexer-topk", type=int, default=64, help="CSA compressed blocks selected per token")
+    parser.add_argument("--indexer-topk", type=int, default=32, help="CSA compressed blocks selected per token")
     parser.add_argument("--mhc-lite", action="store_true", help="Test mHC-lite with its fused TPU Pallas kernel")
+    parser.add_argument("--fp32-logits-dot", action="store_true", help="Use FP32 instead of BF16 logits projection output")
+    parser.add_argument("--aggressive", action="store_true", help="Enable fused mHC-lite alongside the default optimizations")
     parser.add_argument("--math", type=float, default=0.05, help="Math data fraction")
     parser.add_argument("--code", type=float, default=0.15, help="Code data fraction")
     args = parser.parse_args(argv)
+    args.mhc_lite = args.mhc_lite or args.aggressive
     if args.length < 2 or args.microbatch < 1 or args.ga < 1:
         parser.error("length must be at least 2; microbatch and GA must be positive")
     if args.warmup_steps < 0 or args.profile_steps < 1 or args.vocab_tiles < 1:
@@ -71,6 +74,7 @@ def main(argv=None):
         cfg.update(steps=steps, profiler="xplane", profile_cleanly=True,
                    num_vocab_tiling=args.vocab_tiles,
                    indexer_topk=args.indexer_topk,
+                   logits_dot_in_fp32=args.fp32_logits_dot,
                    enable_mhc_lite=args.mhc_lite, use_mhc_pallas_kernel=args.mhc_lite,
                    skip_first_n_steps_for_profiler=args.warmup_steps, profiler_steps=args.profile_steps,
                    enable_checkpointing=False, save_checkpoint_on_completion=False,
@@ -90,13 +94,15 @@ def main(argv=None):
                     "csa_head_chunk": cfg["csa_qk_head_chunk_size"],
                     "indexer_topk": args.indexer_topk,
                     "mhc_lite_pallas": args.mhc_lite,
+                    "logits_dot_in_fp32": args.fp32_logits_dot,
                     "math": args.math, "code": args.code}
         (output_dir / "profile-config.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
         print(f"Profiling: length={stage['length']}, "
               f"global microbatch={stage['microbatch']}, GA={stage['accumulation']}, "
               f"warmup={args.warmup_steps}, profile steps={args.profile_steps}, "
               f"vocab tiles={args.vocab_tiles}, CSA head chunk={cfg['csa_qk_head_chunk_size']}, "
-              f"indexer top-k={args.indexer_topk}, mHC-lite Pallas={args.mhc_lite}", flush=True)
+              f"indexer top-k={args.indexer_topk}, mHC-lite Pallas={args.mhc_lite}, "
+              f"FP32 logits dot={args.fp32_logits_dot}", flush=True)
         print(f"TensorBoard logdir: {cfg['base_output_directory']}/{cfg['run_name']}/tensorboard", flush=True)
         print(f"HLO dump: {Path(hlo_dir).resolve()}", flush=True)
         run_training_config(config_path, record_metrics=False)

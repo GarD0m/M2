@@ -126,7 +126,9 @@ def generate(out, tokenizer, output_root, run_prefix, device_count=1, curriculum
                 optimizer_memory_host_offload=False,
                 parameter_memory_host_offload=False,
                 # Fewer selected compressed blocks reduce the costly CSA mask gather.
-                indexer_topk=64,
+                indexer_topk=32,
+                # Keep the loss in FP32, but store the logits projection in BF16.
+                logits_dot_in_fp32=False,
                 num_vocab_tiling=16,
             )
         s["memory_components"] = memory_components(cfg, s)
