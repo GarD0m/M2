@@ -14,14 +14,16 @@ FORMAT = "hf-stream-v1"
 DOMAINS = ("general", "math", "code")
 _BATCH_SIZE = 256
 _CONFIGURED = False
+_TRAIN_WEIGHTS = None
 
 
-def configure(batch_size=256, threads=None):
-    global _BATCH_SIZE, _CONFIGURED
+def configure(batch_size=256, threads=None, train_weights=None):
+    global _BATCH_SIZE, _CONFIGURED, _TRAIN_WEIGHTS
     threads = min(8, os.cpu_count() or 1) if threads is None else threads
     if batch_size < 1 or threads < 1:
         raise ValueError("Tokenizer batch size and threads must be positive")
     _BATCH_SIZE = batch_size
+    _TRAIN_WEIGHTS = train_weights
     os.environ["TOKENIZERS_PARALLELISM"] = "true"
     os.environ.setdefault("RAYON_NUM_THREADS", str(threads))
     os.environ["HF_DATASETS_DISABLE_PROGRESS_BARS"] = "1"
@@ -159,7 +161,9 @@ class StreamingIterator:
         self.positions = np.broadcast_to(np.arange(self.length, dtype=np.int32), self.shape)
         self.input_segments = np.broadcast_to(np.int32(1), self.shape)
         self.weights = [.7, .1, .2]
-        if training:
+        if training and _TRAIN_WEIGHTS is not None:
+            self.weights = _TRAIN_WEIGHTS
+        elif training:
             stage = next(s for s in read_json(ROOT / "configs/curriculum.json")["stages"] if s["length"] == self.length)
             self.weights = [1-stage["math"]-stage["code"], stage["math"], stage["code"]]
         seed = config.data_shuffle_seed + (0 if training else 10000)

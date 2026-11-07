@@ -82,8 +82,8 @@ def memory_components(model, stage):
     }
 
 
-def generate(out, tokenizer, output_root, run_prefix, device_count=1):
-    raw = read_json(ROOT / "configs/curriculum.json")
+def generate(out, tokenizer, output_root, run_prefix, device_count=1, curriculum_config=None):
+    raw = read_json(ROOT / "configs/curriculum.json") if curriculum_config is None else curriculum_config
     stages = curriculum(raw, device_count)
     model = read_json(ROOT / "configs/model.json")
     out = Path(out).resolve()
@@ -152,7 +152,8 @@ def generate(out, tokenizer, output_root, run_prefix, device_count=1):
     manifest = dict(maxtext_version=MAXTEXT_VERSION, stages=stages, device_count=device_count, input_pipeline="hf-stream-v1",
                     warmup_steps=raw["warmup_steps"], parameters=parameter_count(model),
                     approximate_loss_tokens=sum(s["loss_tokens"] for s in stages),
-                    curriculum_sha256=digest(ROOT / "configs/curriculum.json"),
+                    curriculum_sha256=(digest(ROOT / "configs/curriculum.json") if curriculum_config is None
+                                       else hashlib.sha256(json.dumps(raw, sort_keys=True).encode()).hexdigest()),
                     sources_sha256=digest(ROOT / "configs/sources.json"),
                     model_sha256=digest(ROOT / "configs/model.json"),
                     base_sha256=digest(ROOT / "configs/maxtext-base.json"))

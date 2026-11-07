@@ -69,15 +69,15 @@ TensorBoard 只寫入訓練 loss、整次驗證的平均 loss、學習率和每�
 
 ## JAX 瓶頸分析
 
-在 Colab 用獨立設定檔啟用 MaxText 的 JAX XPlane trace：
+在 Colab 執行獨立的 MaxText JAX XPlane 測試：
 
 ```python
-%run -m llm5.start --profile-config configs/profiler.json
+%run -m llm5.profile --length 1024 --microbatch 32 --ga 16 --warmup-steps 1 --profile-steps 4
 ```
 
-預設在每個執行中的長度階段，從開始或續訓位置跳過 5 個 optimizer steps，再擷取最多 5 步。若剩餘步數不足以跳過暖機區間，該階段會略過擷取。可在 `configs/profiler.json` 調整跳過與擷取的步數。擷取後會繼續正常訓練。
+測試只執行一組由 CLI 指定的配置，不讀取 curriculum；`microbatch` 是全域 sequence 數，須能被 TPU 裝置數整除。預設長度 1024、microbatch 32、GA 16；可用 `--math` 和 `--code` 指定資料比例，預設為 0.05 和 0.15。模型和資料來源仍沿用訓練設定。`--warmup-steps` 指定擷取前跳過的 optimizer steps（預設 1，可設 0），`--profile-steps` 指定擷取步數（預設 4，至少 1）；總共執行兩者相加再多 1 步，以完成 trace。每次測試使用新的本機目錄，不讀取或儲存訓練 checkpoint，也不上傳 Hub。正式訓練仍使用 `llm5.start`。
 
-Trace 存在本機的 `<output-root>/<run-name>/tensorboard/plugins/profile/`。在 Colab 安裝 `xprof`（`%pip install xprof`），再開啟上述 TensorBoard 的 **Profile → Trace Viewer**。對照 `train` step、主機資料載入與 TPU kernel 時間軸，查看 TPU 空檔是否與讀取、分詞、資料傳輸或同步重疊。擷取期間會同步 TPU，分析平常的 tokens/s 時可使用擷取區間以外的數值。Trace 留在 Colab runtime 本機。
+程式會印出本次 TensorBoard logdir，位於 `runs/profiles/<測試識別碼>/tensorboard`；trace 位於該目錄的 `plugins/profile/`。在 Colab 安裝 `xprof`（`%pip install xprof`），以該 logdir 開啟 TensorBoard 的 **Profile → Trace Viewer**。對照 `train` step、主機資料載入與 TPU kernel 時間軸，查看 TPU 空檔是否與讀取、分詞、資料傳輸或同步重疊。擷取期間會同步 TPU，分析平常的 tokens/s 時可使用擷取區間以外的數值。Trace 留在 Colab runtime 本機。
 
 DeepSeek V4 預設 run prefix 是 `m2-deepseek4-1pass-16e-512k-v1`。Hub 在 `runs/<run-prefix>/latest.json` 保存獨立續訓索引，同時更新根目錄 `latest.json`。單輪訓練使用自己的 checkpoint 索引。
 
