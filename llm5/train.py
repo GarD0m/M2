@@ -447,14 +447,17 @@ def install_moe_route_reuse(moe):
 
 
 def install_aligned_logits_tiles(trainer):
+    from maxtext.common.common_types import ShardMode
     from maxtext.configs.pyconfig import HyperParameters
+    from llm5.logits import single_pass_tiled_loss
     from llm5.plan import aligned_logits_tiles
 
     native = trainer.vocab_tiling_nnx_loss
-    if getattr(native, "_llm5_per_device_logits_tiles", False):
+    if getattr(native, "_llm5_single_pass_logits_tiles", False):
         return
-    if (getattr(native, "_llm5_hyperparameter_logits_tiles", False)
-            or getattr(native, "_llm5_aligned_logits_tiles", False)):
+    if any(getattr(native, marker, False) for marker in (
+        "_llm5_per_device_logits_tiles", "_llm5_hyperparameter_logits_tiles", "_llm5_aligned_logits_tiles"
+    )):
         native = native.__wrapped__
 
     @wraps(native)
@@ -475,13 +478,18 @@ def install_aligned_logits_tiles(trainer):
                 config = HyperParameters(config._pydantic_config.model_copy(update=update))
             else:
                 config = config.model_copy(update=update)
+        if (is_train and config.decoder_block == "deepseek4" and model.mesh.size == 1
+                and config.shard_mode == ShardMode.AUTO and config.logits_via_embedding and config.cast_logits_to_fp32
+                and not config.enable_dropout and not config.vocab_tiling_ag_once
+                and not config.parameter_memory_host_offload):
+            return single_pass_tiled_loss(model, hidden_states, data, config)
         return native(model, hidden_states, data, config, is_train)
 
-    loss._llm5_per_device_logits_tiles = True
+    loss._llm5_single_pass_logits_tiles = True
     trainer.vocab_tiling_nnx_loss = loss
 
 
-def load_trainer(native_csa_mask=False):
+def load_trainer():
     configure_tpu()
     load_maxtext_conversion_configs()
     install_checkpoint_manager_compat()
@@ -492,7 +500,7 @@ def load_trainer(native_csa_mask=False):
     install_metric_diagnostics()
     install_deepseek4_support()
     from llm5.csa import install_streamindex_mask
-    install_streamindex_mask(enabled=not native_csa_mask)
+    install_streamindex_mask()
     from maxtext.trainers.pre_train import train
     install_aligned_logits_tiles(train)
     return train
@@ -505,8 +513,7 @@ def main():
     app.run(train.main)
 
 
-def run_training_config(config_path, start_step=0, checkpoint_hub=None, overrides=(), record_metrics=True,
-                        native_csa_mask=False):
+def run_training_config(config_path, start_step=0, checkpoint_hub=None, overrides=(), record_metrics=True):
     """Run MaxText directly in the caller's process; preserve native exceptions."""
     global _TRAINING_PROGRESS
     config = json.loads(Path(config_path).read_text(encoding="utf-8"))
@@ -519,7 +526,7 @@ def run_training_config(config_path, start_step=0, checkpoint_hub=None, override
         metric_writer = None
         try:
             from absl import flags
-            train = load_trainer(native_csa_mask=native_csa_mask)
+            train = load_trainer()
             if not record_metrics:
                 from maxtext.common import metric_logger
                 metric_writer = metric_logger.MetricLogger.write_metrics_to_tensorboard

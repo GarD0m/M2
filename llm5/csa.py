@@ -6,17 +6,13 @@ copyright 2023–2026 Google LLC, Apache-2.0 (see LICENSES/MaxText-LICENSE.txt).
 from functools import wraps
 
 
-def install_streamindex_mask(enabled=True):
+def install_streamindex_mask():
     import jax
     import jax.numpy as jnp
     from maxtext.layers import attention_compressed as csa
 
     native = csa.DeepseekV4CSACompressor.__call__
     if getattr(native, "_llm5_dense_csa_mask", False):
-        if not enabled:
-            csa.DeepseekV4CSACompressor.__call__ = native.__wrapped__
-        return
-    if not enabled:
         return
 
     def pool(module, inputs, positions, width):
