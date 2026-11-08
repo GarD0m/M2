@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from llm5 import launch, streaming
 from llm5.plan import aligned_logits_tiles, generate, read_json, use_short_context_tuning
-from llm5.train import configure_tpu, run_training_config
+from llm5.train import POLAR_EXPRESS_COEFFICIENTS, configure_tpu, run_training_config
 
 MATH_FRACTION = 0.05
 CODE_FRACTION = 0.15
@@ -86,6 +86,7 @@ def main(argv=None):
                     "prefuse_moe_weights": cfg["prefuse_moe_weights"],
                     "moe_up_projections_saved": cfg.get("moe_mlpwi_0") == cfg.get("moe_mlpwi_1") == "device",
                     "moe_sorted_input_saved": cfg.get("moe_x_sorted") == "device",
+                    "muon_polar_express_steps": len(POLAR_EXPRESS_COEFFICIENTS),
                     "splash_context_saved": cfg.get("context") == "device",
                     "mhc_lite": cfg["enable_mhc_lite"],
                     "mhc_lite_pallas": cfg["use_mhc_pallas_kernel"],

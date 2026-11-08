@@ -79,15 +79,17 @@ TensorBoard 只寫入訓練 loss、整次驗證的平均 loss、學習率和每�
 
 預設測量 1K／microbatch 32／GA 16，先暖機一步，再擷取一步。可用 `--length`、`--microbatch`、`--ga`、`--warmup-steps` 和 `--profile-steps` 調整。Microbatch 是全域 sequence 數，須能被 TPU 裝置數整除。模型設定與正式訓練相同，資料比例固定為 5% 數學與 15% 程式碼。每次測試使用新的本機目錄，不讀取或儲存訓練 checkpoint，也不上傳 Hub。
 
-單裝置 TPU v5e、1K／microbatch 32／GA 16 的 `20261108-160128-ac2a3ad1-test` 實測 **9.094 秒／步**，較上一筆 9.517 秒／步縮短 **4.45%**。HLO 預設記憶體配置為 15.04 GiB，MoE gate/up 權重梯度累計從 0.538 降至 0.327 秒。下次採用相同設定擷取一次 trace，即可與這筆 **9.094 秒／步**比較。
+單裝置 TPU v5e、1K／microbatch 32／GA 16 的 `20261108-161239-8ef09c15-test` 實測 **9.057 秒／步**，較上一筆 9.094 秒／步縮短 **0.41%**。HLO 預設記憶體配置從 15.04 增至 15.32 GiB。下一次以相同設定擷取一筆 trace，可直接與 **9.057 秒／步**比較。
 
 單裝置 v5e 和 v6e 的短序列 logits 每四塊合併做反向矩陣乘法。v5e 在 1K／microbatch 32 時將完整詞表梯度累加從八次減為四次，每組 BF16 logits 梯度最多 1 GiB。v6e 則累加兩次，每組最多 2 GiB。FP32 softmax 仍逐塊處理。同一 1K／microbatch 32 規格也縮小 MoE 上投影權重梯度的輸出 tile，並將 mHC-lite 反向的 feature tile 從 1024 擴至 2048。
+
+單裝置短序列的 MoE 直接以專家順序計算輸出梯度，省去 token 順序的大型梯度暫存與一次反向排序。Optax Muon 採五輪 Polar Express 正交化，取代 MaxText DeepSeek V4 預設的十輪 Newton–Schulz，會改變更新數值與 optimizer state 的係數形狀。[Polar Express 論文](https://arxiv.org/abs/2505.16932) · [nanochat 係數](https://github.com/karpathy/nanochat/blob/master/nanochat/optim.py)
 
 程式會印出本次 TensorBoard logdir，位於 `runs/profiles/<測試識別碼>/tensorboard`；XProf trace 位於該目錄的 `plugins/profile/`，編譯時的 HLO 文字與 protobuf dump 則位於同一測試目錄的 `hlo/`。在 Colab 安裝 `xprof`（`%pip install xprof`），以該 logdir 開啟 XProf 的 **Trace Viewer** 等工具，分析主機、TPU kernel 與運算時間；HLO 檔案可另用於檢查編譯結果。測試仍會執行 loss 與梯度計算，但不將訓練指標寫入 TensorBoard。檔案留在 Colab runtime 本機，HLO dump 可能佔用大量空間。
 
 HLO dump 的 XLA 設定必須在 JAX 後端初始化前生效。請在新的 Colab runtime 執行 profiler；每次重新執行 profiler 或切換回正式訓練前，也請重新啟動 runtime。Profiler 會停用該程序的 JAX 編譯快取以確保重新編譯，並保留原有的 `XLA_FLAGS`；若其中已設定 `--xla_dump_to`，需先移除該項。
 
-DeepSeek V4 mHC-lite 預設 run prefix 是 `m2-deepseek4-mhc-lite-16e-512k-v2`。Hub 在 `runs/<run-prefix>/latest.json` 保存獨立續訓索引，同時更新根目錄 `latest.json`。單輪訓練使用自己的 checkpoint 索引。
+DeepSeek V4 mHC-lite 預設 run prefix 是 `m2-deepseek4-mhc-lite-16e-512k-v3`，對應五輪 Polar Express 的 optimizer state。Hub 在 `runs/<run-prefix>/latest.json` 保存獨立續訓索引，同時更新根目錄 `latest.json`。單輪訓練使用自己的 checkpoint 索引。
 
 下次執行相同命令，會自動讀取 Hub 最新 checkpoint，驗證 model／curriculum／tokenizer／輸入格式是否匹配，下載並恢復完整訓練狀態；若本機有更新的 checkpoint 則優先使用本機。已完成階段不會重新訓練；切換長度階段沿用串流 cursor 與未使用的 tokens。新 Colab runtime 直接恢復 streaming，不需要重建訓練資料。舊版預先打包資料的 iterator 不相容，會直接報錯，避免默默重置資料位置。這些是 MaxText 訓練 checkpoint，並非直接供 `AutoModel.from_pretrained` 使用的 Transformers 權重。
 

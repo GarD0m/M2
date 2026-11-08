@@ -10,6 +10,15 @@ import os
 from tqdm.auto import tqdm
 
 _TRAINING_PROGRESS = None
+# Five-step Polar Express schedule from nanochat (2% safety factor, cushion 2).
+# https://github.com/karpathy/nanochat/blob/master/nanochat/optim.py
+POLAR_EXPRESS_COEFFICIENTS = (
+    (8.1565545249, -22.4832929256, 15.8787699152),
+    (4.0429299352, -2.8089174659, 0.5000178451),
+    (3.8916678023, -2.7724841532, 0.5060648179),
+    (3.2857536578, -2.3681294933, 0.4644902423),
+    (2.3465413259, -1.7097828383, 0.4232355117),
+)
 TENSORBOARD_SCALARS = {
     "learning/loss",
     "learning/current_learning_rate",
@@ -259,6 +268,24 @@ def install_fused_qkv_muon_support(module=None):
     # over D and flatten both output axes, rather than batch over heads.
     if "qkv_proj" not in module.ATTENTION_QKV_NAMES:
         module.ATTENTION_QKV_NAMES += ("qkv_proj",)
+
+
+def install_deepseek4_polar_express():
+    from maxtext.optimizers import optimizers
+
+    native = optimizers.optax_muon
+    if getattr(native, "_llm5_polar_express", False):
+        return
+
+    @wraps(native)
+    def muon(*args, **kwargs):
+        # MaxText 0.2.5 selects ten steps only for DeepSeek V4.
+        if kwargs.get("ns_steps") == 10:
+            kwargs.update(ns_coeffs=POLAR_EXPRESS_COEFFICIENTS, ns_steps=len(POLAR_EXPRESS_COEFFICIENTS))
+        return native(*args, **kwargs)
+
+    muon._llm5_polar_express = True
+    optimizers.optax_muon = muon
 
 
 def install_mhc_low_memory():
@@ -532,7 +559,7 @@ def install_moe_route_reuse(moe):
 
 
 def install_moe_combine_reuse(moe):
-    """Retain token-ordered expert outputs for the router weight gradient.
+    """Reuse expert outputs and form their cotangents in expert order.
 
     Adapted from MaxText 0.2.5 (Google LLC, Apache-2.0).
     """
@@ -546,6 +573,32 @@ def install_moe_combine_reuse(moe):
     if getattr(native, "_llm5_token_order", False):
         return
 
+    def gather_rows(value, indices):
+        return value.at[indices].get(mode="promise_in_bounds", wrap_negative_indices=False)
+
+    def combine_forward(intermediate, permutation, weights, precision):
+        inverse = jnp.argsort(permutation)
+        ordered = gather_rows(intermediate, inverse).reshape(*weights.shape, intermediate.shape[-1])
+        ordered = checkpoint_name(ordered, "llm5_moe_token_order")
+        output = jnp.einsum("tke,tk->te", ordered, weights, precision=precision)
+        return output, (ordered, permutation, weights)
+
+    @partial(jax.custom_vjp, nondiff_argnums=(3,))
+    def combine(intermediate, permutation, weights, precision):
+        return combine_forward(intermediate, permutation, weights, precision)[0]
+
+    def combine_backward(precision, residuals, gradient):
+        ordered, permutation, weights = residuals
+        # Gather from [tokens, width] before multiplying by the expert weights.
+        # This skips the token-ordered [tokens, top_k, width] cotangent buffer.
+        token_gradient = gather_rows(gradient, permutation // weights.shape[1])
+        expert_weights = gather_rows(weights.reshape(-1), permutation)
+        expert_gradient = token_gradient * expert_weights[:, None]
+        weight_gradient = jnp.einsum("te,tke->tk", gradient, ordered, precision=precision)
+        return expert_gradient, None, weight_gradient
+
+    combine.defvjp(combine_forward, combine_backward)
+
     @wraps(native)
     def unpermute(self, intermediate, sorted_selected_experts, weights, batch_size, sequence_length,
                   use_custom_sort_vjp=True, group_sizes=None, topk_argsort_indices=None):
@@ -556,16 +609,22 @@ def install_moe_combine_reuse(moe):
             return native(self, intermediate, sorted_selected_experts, weights, batch_size, sequence_length,
                           use_custom_sort_vjp, group_sizes, topk_argsort_indices)
 
+        weights = weights.reshape(-1, self.num_experts_per_tok)
+        precision = jax.lax.Precision(cfg.matmul_precision)
+        if use_custom_sort_vjp and not cfg.float32_weight_sum and intermediate.dtype == weights.dtype:
+            with jax.named_scope("weight_sum"):
+                output = combine(intermediate, sorted_selected_experts, weights, precision)
+            return output.reshape(batch_size, sequence_length, -1).astype(self.dtype)
+
         inverse = jnp.argsort(sorted_selected_experts)
         ordered = moe._sort_activations(intermediate, inverse, use_custom_sort_vjp)
         ordered = checkpoint_name(ordered, "llm5_moe_token_order")
-        weights = weights.reshape(-1, self.num_experts_per_tok)
         ordered = ordered.reshape(*weights.shape, -1)
         if cfg.float32_weight_sum:
             ordered = ordered.astype(jnp.float32)
             weights = weights.astype(jnp.float32)
         with jax.named_scope("weight_sum"):
-            output = jnp.einsum("bke,bk->be", ordered, weights, precision=jax.lax.Precision(cfg.matmul_precision))
+            output = jnp.einsum("bke,bk->be", ordered, weights, precision=precision)
         return output.reshape(batch_size, sequence_length, -1).astype(self.dtype)
 
     unpermute._llm5_token_order = True
@@ -624,6 +683,7 @@ def load_trainer():
     install_streaming_input()
     install_json_config_support()
     install_fused_qkv_muon_support()
+    install_deepseek4_polar_express()
     install_metric_diagnostics()
     install_deepseek4_support()
     from llm5.csa import install_streamindex_mask
