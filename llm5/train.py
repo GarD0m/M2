@@ -350,26 +350,31 @@ def install_mhc_pallas_tracer_compat():
 
     decoder = nnx_decoders.NNXDecoder
     native_policy = decoder.get_remat_policy
-    if not getattr(native_policy, "_llm5_mhc_pre", False):
-        save_pre = jax.checkpoint_policies.save_only_these_names("llm5_mhc_pre")
-
+    if getattr(native_policy, "_llm5_mhc_pre", False):
+        native_policy = native_policy.__wrapped__
+    if not getattr(native_policy, "_llm5_short_context_remat", False):
         @wraps(native_policy)
         def get_remat_policy(self):
             policy = native_policy(self)
             cfg = self.config
-            if (not cfg.use_mhc_pallas_kernel or policy is None
+            if (policy is None
                     or (getattr(self, "remat_policy_override", None) or cfg.remat_policy) != "custom"
                     or not use_short_context_tuning(cfg.max_target_length, cfg.per_device_batch_size, self.mesh.size)):
                 return policy
 
-            def keep_mhc_pre(primitive, *args, **params):
-                if save_pre(primitive, *args, **params):
+            names = ["llm5_moe_token_order"]
+            if cfg.use_mhc_pallas_kernel:
+                names.append("llm5_mhc_pre")
+            save = jax.checkpoint_policies.save_only_these_names(*names)
+
+            def keep_short_context(primitive, *args, **params):
+                if save(primitive, *args, **params):
                     return True
                 return policy(primitive, *args, **params)
 
-            return keep_mhc_pre
+            return keep_short_context
 
-        get_remat_policy._llm5_mhc_pre = True
+        get_remat_policy._llm5_short_context_remat = True
         decoder.get_remat_policy = get_remat_policy
 
     native_permutations = mhc.get_permutation_matrices
@@ -457,6 +462,7 @@ def install_deepseek4_support():
     install_mhc_pallas_tracer_compat()
     install_deepseek4_rope()
     install_moe_route_reuse(moe)
+    install_moe_combine_reuse(moe)
     decoder = nnx_decoders.NNXDecoder
     native = decoder._apply_deepseek4_scanned_blocks
     if getattr(native, "_llm5_loop3_remat", False) or getattr(native, "_llm5_loop3", False):
@@ -523,6 +529,47 @@ def install_moe_route_reuse(moe):
 
     route_activations._llm5_reuse_permutation = True
     moe._route_activations = route_activations
+
+
+def install_moe_combine_reuse(moe):
+    """Retain token-ordered expert outputs for the router weight gradient.
+
+    Adapted from MaxText 0.2.5 (Google LLC, Apache-2.0).
+    """
+    import jax
+    import jax.numpy as jnp
+    from jax.ad_checkpoint import checkpoint_name
+    from maxtext.common.common_types import DecoderBlockType
+    from llm5.plan import use_short_context_tuning
+
+    native = moe.RoutedMoE.unpermute
+    if getattr(native, "_llm5_token_order", False):
+        return
+
+    @wraps(native)
+    def unpermute(self, intermediate, sorted_selected_experts, weights, batch_size, sequence_length,
+                  use_custom_sort_vjp=True, group_sizes=None, topk_argsort_indices=None):
+        cfg = self.config
+        if (cfg.decoder_block != DecoderBlockType.DEEPSEEK4 or cfg.use_ring_of_experts
+                or cfg.use_ragged_sort or cfg.remat_policy != "custom"
+                or not use_short_context_tuning(sequence_length, batch_size, self.mesh.size)):
+            return native(self, intermediate, sorted_selected_experts, weights, batch_size, sequence_length,
+                          use_custom_sort_vjp, group_sizes, topk_argsort_indices)
+
+        inverse = jnp.argsort(sorted_selected_experts)
+        ordered = moe._sort_activations(intermediate, inverse, use_custom_sort_vjp)
+        ordered = checkpoint_name(ordered, "llm5_moe_token_order")
+        weights = weights.reshape(-1, self.num_experts_per_tok)
+        ordered = ordered.reshape(*weights.shape, -1)
+        if cfg.float32_weight_sum:
+            ordered = ordered.astype(jnp.float32)
+            weights = weights.astype(jnp.float32)
+        with jax.named_scope("weight_sum"):
+            output = jnp.einsum("bke,bk->be", ordered, weights, precision=jax.lax.Precision(cfg.matmul_precision))
+        return output.reshape(batch_size, sequence_length, -1).astype(self.dtype)
+
+    unpermute._llm5_token_order = True
+    moe.RoutedMoE.unpermute = unpermute
 
 
 def install_aligned_logits_tiles(trainer):

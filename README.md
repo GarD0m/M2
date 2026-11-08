@@ -79,7 +79,7 @@ TensorBoard 只寫入訓練 loss、整次驗證的平均 loss、學習率和每�
 
 預設測量 1K／microbatch 32／GA 16，先暖機一步，再擷取一步。可用 `--length`、`--microbatch`、`--ga`、`--warmup-steps` 和 `--profile-steps` 調整。Microbatch 是全域 sequence 數，須能被 TPU 裝置數整除。模型設定與正式訓練相同，資料比例固定為 5% 數學與 15% 程式碼。每次測試使用新的本機目錄，不讀取或儲存訓練 checkpoint，也不上傳 Hub。
 
-單裝置 1K／microbatch 32／GA 16 的 `20261108-151928-e8c17c36-test` 實測 **9.916 秒／步**，較上一筆 10.041 秒／步縮短約 1.25%，HLO 預設記憶體配置為 15.06 GiB。mHC-lite 前向重算減少，MoE 下投影的 GMM 時間近乎相同。下一次量測可直接和 **9.916 秒／步**比較，檢查排序輸入、attention 殘值和目標 logit 讀取的改動。
+單裝置 1K／microbatch 32／GA 16 的 `20261108-153008-d8206ea3-test` 實測 **9.625 秒／步**，較上一筆 9.916 秒／步縮短約 2.93%，HLO 預設記憶體配置為 15.16 GiB。Splash 前向核心的累計時間從 0.114 降至 0.057 秒。下一次可直接和 **9.625 秒／步**比較，檢查 MoE 反向重用 token 順序下的專家輸出，以及直接從 BF16 投影讀取目標 logit 的效果。交叉熵歸約保留 FP32。
 
 程式會印出本次 TensorBoard logdir，位於 `runs/profiles/<測試識別碼>/tensorboard`；XProf trace 位於該目錄的 `plugins/profile/`，編譯時的 HLO 文字與 protobuf dump 則位於同一測試目錄的 `hlo/`。在 Colab 安裝 `xprof`（`%pip install xprof`），以該 logdir 開啟 XProf 的 **Trace Viewer** 等工具，分析主機、TPU kernel 與運算時間；HLO 檔案可另用於檢查編譯結果。測試仍會執行 loss 與梯度計算，但不將訓練指標寫入 TensorBoard。檔案留在 Colab runtime 本機，HLO dump 可能佔用大量空間。
 

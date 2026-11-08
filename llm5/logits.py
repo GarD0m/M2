@@ -14,11 +14,18 @@ def single_pass_tiled_loss(model, hidden_states, data, config):
     graphdef, head, other, rest = nnx.split(model, _is_output_head_param_path, nnx.Param, ...)
     tiles = config.num_vocab_tiling
     z_multiplier = config.z_loss_multiplier
+    keep_bf16_logits = (
+        config.dtype == jnp.bfloat16 and not config.logits_dot_in_fp32
+        and not config.normalize_embedding_logits and not config.final_logits_soft_cap
+    )
 
     def scan_loss(head, other, rest, hidden, labels, segmentation, differentiate):
         def project(params, x):
             local = nnx.merge(graphdef, params, other, rest, copy=True)
-            return local.logits_from_hidden_states_for_vocab_tiling(x, True, "train")
+            logits = local.logits_from_hidden_states_for_vocab_tiling(x, True, "train")
+            # The tied projection already rounded to BF16 before MaxText's
+            # FP32 cast. Keep the label gather on the smaller representation.
+            return logits.astype(jnp.bfloat16) if keep_bf16_logits else logits
 
         def body(carry, tile):
             losses, head_grad = carry
@@ -29,8 +36,8 @@ def single_pass_tiled_loss(model, hidden_states, data, config):
             else:
                 logits = project(head, x)
 
-            row_max = logits.max(axis=-1)
-            exp_shifted = jnp.exp(logits - row_max[:, None])
+            row_max = logits.max(axis=-1).astype(jnp.float32)
+            exp_shifted = jnp.exp(logits.astype(jnp.float32) - row_max[:, None])
             sum_exp = exp_shifted.sum(axis=-1)
             log_sum = jnp.log(sum_exp)
             log_z = row_max + log_sum
@@ -39,6 +46,7 @@ def single_pass_tiled_loss(model, hidden_states, data, config):
             # Only one logit per row contributes to the label term. Gather
             # before centering to avoid reducing a dense one-hot target.
             target_logits = jnp.take_along_axis(logits, jnp.clip(targets, 0, vocab - 1)[:, None], axis=-1)[:, 0]
+            target_logits = target_logits.astype(jnp.float32)
             z_loss = z_multiplier * jax.lax.square(log_z)
             xent = jnp.where(valid_targets, log_sum - (target_logits - row_max), 0.0) + z_loss
 
@@ -46,7 +54,7 @@ def single_pass_tiled_loss(model, hidden_states, data, config):
                 scale = (1 + 2 * z_multiplier * log_z)[:, None]
                 target_matches = targets[:, None] == jnp.arange(vocab)
                 dlogits = (scale * exp_shifted / sum_exp[:, None] - target_matches) * mask[:, None]
-                head_update, dx = project_vjp(dlogits)
+                head_update, dx = project_vjp(dlogits.astype(logits.dtype))
                 head_grad = jax.tree.map(jnp.add, head_grad, head_update)
             else:
                 dx = None
