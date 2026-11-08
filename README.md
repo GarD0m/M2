@@ -25,7 +25,7 @@ os.environ["JAX_PLATFORMS"] = "tpu"
 os.environ["JAX_COMPILATION_CACHE_DIR"] = "/content/jax-cache"
 ```
 
-自訂 remat 在 TPU 上保留 Q/KV projections 和 MoE top-k 路由索引。單裝置在序列長度不超過 1024、每 microbatch 不超過 32768 tokens 時，也保留 MoE 排序後的輸入和上投影輸出、Splash attention 殘值，以及 mHC-lite Pallas 的分支輸入與混合係數供反向重用。MoE 反向重用排序索引，前後向 gather 使用已知在範圍內的索引，router 梯度採用 MaxText 的 dense VJP。模型參數與 optimizer state 也留在 TPU。單裝置下，CSA teacher 在 1K／2K 分別以 4／2 heads 為一組，4K 起每組 1 head。符合上述短序列條件時，logits 最多分 8 塊，減少完整詞表梯度的累加次數。其他階段最多分 16 塊。每 microbatch 32768 tokens 時，單塊 FP32 logits 分別是 1 GiB 和 512 MiB。分塊優先讓每塊對齊 128 tokens，驗證依 batch 縮減分塊數。mHC RMSNorm 和 HyperHead 的大型運算元使用 BF16，歸約保留 FP32。
+自訂 remat 在 TPU 上保留 Q/KV projections 和 MoE top-k 路由索引。單裝置在序列長度不超過 1024、每 microbatch 不超過 32768 tokens 時，也保留 MoE 排序後的輸入和上投影輸出、Splash attention 殘值，以及 mHC-lite Pallas 的分支輸入與混合係數供反向重用。MoE 反向重用排序索引，前後向 gather 使用已知在範圍內的索引，router 梯度採用 MaxText 的 dense VJP。模型參數與 optimizer state 也留在 TPU。單裝置下，CSA teacher 在 1K／2K 分別以 4／2 heads 為一組，4K 起每組 1 head。符合上述短序列條件時，v5e 的 logits 最多分 16 塊，其餘裝置最多分 8 塊。較長序列最多分 16 塊。每 microbatch 32768 tokens 時，16 塊的單塊 FP32 logits 為 512 MiB，8 塊則為 1 GiB。分塊優先讓每塊對齊 128 tokens，驗證依 batch 縮減分塊數。mHC RMSNorm 和 HyperHead 的大型運算元使用 BF16，歸約保留 FP32。
 
 CSA indexer 每個 token 最多選取 32 個壓縮區塊。無 cache 的 StreamIndex 訓練路徑沿用原有 top-k 排序，直接在區塊順序中套用 causal 與 segment 限制，省去逐列擷取 top-k 有效性。DeepSeek V4 RoPE 直接成對旋轉相鄰通道，省去拆分奇偶通道的跨步切片與反向補零。logits 投影使用 BF16 輸出，交叉熵仍轉為 FP32 計算。單裝置訓練在每個分塊內共用 loss 與梯度所需的投影和 softmax 歸約，並直接讀取目標類別的 logit。
 
@@ -81,7 +81,9 @@ TensorBoard 只寫入訓練 loss、整次驗證的平均 loss、學習率和每�
 
 單裝置 1K／microbatch 32／GA 16 的 `20261108-154025-69b9fe37-test` 實測 **9.517 秒／步**，較上一筆 9.625 秒／步縮短約 1.12%，HLO 預設記憶體配置從 15.16 降至 15.00 GiB。下一次可直接和 **9.517 秒／步**比較。
 
-單裝置 v6e 的短序列 logits 將每四塊 BF16 梯度合併做反向矩陣乘法，將完整詞表梯度的累加從八次減為兩次。FP32 softmax 每次仍只處理一塊，每組 BF16 logits 梯度最多 2 GiB。相同的 1K／microbatch 32 規格也縮小 MoE 上投影權重梯度的輸出 tile，並將 mHC-lite 反向的 feature tile 從 1024 擴至 2048。新版 TPU 步時與 HLO 記憶體仍待實測。
+`20261108-155051-5995b2d5-test` 的 XPlane 標示 TPU v5e，實測 **9.517 秒／步**，與上一筆相同至小數第三位。該次只對 v6e 開啟的調校未進入量測。
+
+單裝置 v5e 和 v6e 的短序列 logits 現在都會每四塊合併做反向矩陣乘法。v5e 在 1K／microbatch 32 時將完整詞表梯度累加從八次減為四次，每組 BF16 logits 梯度最多 1 GiB。v6e 則累加兩次，每組最多 2 GiB。FP32 softmax 仍逐塊處理。同一 1K／microbatch 32 規格也縮小 MoE 上投影權重梯度的輸出 tile，並將 mHC-lite 反向的 feature tile 從 1024 擴至 2048。Profiler 會記錄晶片型號，新版步時和 HLO 記憶體仍待實測。
 
 程式會印出本次 TensorBoard logdir，位於 `runs/profiles/<測試識別碼>/tensorboard`；XProf trace 位於該目錄的 `plugins/profile/`，編譯時的 HLO 文字與 protobuf dump 則位於同一測試目錄的 `hlo/`。在 Colab 安裝 `xprof`（`%pip install xprof`），以該 logdir 開啟 XProf 的 **Trace Viewer** 等工具，分析主機、TPU kernel 與運算時間；HLO 檔案可另用於檢查編譯結果。測試仍會執行 loss 與梯度計算，但不將訓練指標寫入 TensorBoard。檔案留在 Colab runtime 本機，HLO dump 可能佔用大量空間。
 

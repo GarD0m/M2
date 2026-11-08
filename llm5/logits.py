@@ -4,7 +4,7 @@ Adapted from MaxText 0.2.5's vocabulary tiling, copyright 2025–2026 Google LLC
 Apache-2.0 (see LICENSES/MaxText-LICENSE.txt).
 """
 
-from llm5.plan import V6E_DEVICE_KINDS
+from llm5.plan import GROUPED_LOGITS_TILES
 
 
 def single_pass_tiled_loss(model, hidden_states, data, config):
@@ -20,11 +20,12 @@ def single_pass_tiled_loss(model, hidden_states, data, config):
         config.dtype == jnp.bfloat16 and not config.logits_dot_in_fp32
         and not config.normalize_embedding_logits and not config.final_logits_soft_cap
     )
+    device_kind = model.mesh.devices.flat[0].device_kind.casefold()
+    tokens = hidden_states.shape[0] * hidden_states.shape[1]
     group_gradients = (
-        keep_bf16_logits and model.mesh.devices.flat[0].device_kind in V6E_DEVICE_KINDS
-        and tiles == 8 and hidden_states.shape[1] <= 1024
-        and hidden_states.shape[0] * hidden_states.shape[1] <= 32768
-        and hidden_states.shape[0] * hidden_states.shape[1] * config.vocab_size <= 2 * 1024**3
+        keep_bf16_logits and tiles == GROUPED_LOGITS_TILES.get(device_kind)
+        and hidden_states.shape[1] <= 1024 and tokens <= 32768
+        and tokens * config.vocab_size <= 2 * 1024**3
         and hasattr(getattr(model, "decoder", None), "decoder_norm")
         and hasattr(model.token_embedder, "embedding")
         and isinstance(model.token_embedder.embedding[...], jax.Array)

@@ -44,6 +44,7 @@ def main(argv=None):
     configure_tpu()
     streaming.configure(train_weights=[1 - MATH_FRACTION - CODE_FRACTION, MATH_FRACTION, CODE_FRACTION])
     device_count = launch.check_runtime()
+    device_kind = jax.devices()[0].device_kind
     if args.microbatch % device_count:
         parser.error("global microbatch must be divisible by the TPU device count")
     # A fresh directory prevents MaxText from restoring or overwriting a training run.
@@ -57,7 +58,7 @@ def main(argv=None):
     with TemporaryDirectory(prefix="llm5-profile-") as temporary:
         manifest = generate(temporary, "models/tokenizer", "runs/profiles",
                             run_id, device_count=device_count, curriculum_config=curriculum,
-                            device_kind=jax.devices()[0].device_kind)
+                            device_kind=device_kind)
         stage = manifest["stages"][0]
         config_path = Path(stage["config"])
         cfg = read_json(config_path)
@@ -74,7 +75,7 @@ def main(argv=None):
         tile_limit = cfg["num_vocab_tiling"]
         effective_tiles = aligned_logits_tiles(args.length * stage["per_device_microbatch"], tile_limit)
         metadata = {"length": args.length, "global_microbatch": args.microbatch, "ga": args.ga,
-                    "device_count": device_count, "warmup_steps": args.warmup_steps,
+                    "device_count": device_count, "device_kind": device_kind, "warmup_steps": args.warmup_steps,
                     "profile_steps": args.profile_steps, "vocab_tiles": tile_limit,
                     "effective_vocab_tiles": effective_tiles,
                     "csa_head_chunk": cfg["csa_qk_head_chunk_size"],
@@ -94,7 +95,7 @@ def main(argv=None):
                     "logits_dot_in_fp32": cfg["logits_dot_in_fp32"],
                     "math": MATH_FRACTION, "code": CODE_FRACTION}
         (output_dir / "profile-config.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
-        print(f"Profiling: length={stage['length']}, "
+        print(f"Profiling: {device_kind}, length={stage['length']}, "
               f"global microbatch={stage['microbatch']}, GA={stage['accumulation']}, "
               f"warmup={args.warmup_steps}, profile steps={args.profile_steps}, "
               f"vocab tiles={effective_tiles}/{tile_limit}, CSA head chunk={cfg['csa_qk_head_chunk_size']}, "

@@ -9,7 +9,12 @@ MAXTEXT_VERSION = "0.2.5"
 ROOT = Path(__file__).resolve().parents[1]
 CSA_HEAD_CHUNK_BUDGET = 128 * 1024**2
 LOGITS_TILE_ALIGNMENT = 128
-V6E_DEVICE_KINDS = {"TPU v6e", "TPU v6 lite"}
+GROUPED_LOGITS_TILES = {
+    "tpu v5e": 16,
+    "tpu v5 lite": 16,
+    "tpu v6e": 8,
+    "tpu v6 lite": 8,
+}
 
 
 def use_short_context_tuning(length, per_device_batch, device_count):
@@ -98,6 +103,7 @@ def memory_components(model, stage):
 
 
 def generate(out, tokenizer, output_root, run_prefix, device_count=1, curriculum_config=None, device_kind=None):
+    device_kind = (device_kind or "").casefold()
     raw = read_json(ROOT / "configs/curriculum.json") if curriculum_config is None else curriculum_config
     stages = curriculum(raw, device_count)
     model = read_json(ROOT / "configs/model.json")
@@ -157,11 +163,11 @@ def generate(out, tokenizer, output_root, run_prefix, device_count=1, curriculum
             if use_short_context_tuning(length, s["per_device_microbatch"], device_count):
                 # Each tile updates the full tied embedding gradient. Use fewer
                 # updates where the measured short-context workload has headroom.
-                cfg["num_vocab_tiling"] = 8
+                cfg["num_vocab_tiling"] = GROUPED_LOGITS_TILES.get(device_kind, 8)
                 cfg["context"] = "device"
                 if cfg.get("prefuse_moe_weights"):
                     cfg.update(moe_mlpwi_0="device", moe_mlpwi_1="device", moe_x_sorted="device")
-                    if (device_kind in V6E_DEVICE_KINDS and length == 1024
+                    if (device_kind in GROUPED_LOGITS_TILES and length == 1024
                             and s["per_device_microbatch"] == 32 and cfg["dtype"] == "bfloat16"
                             and cfg["base_emb_dim"] == cfg["base_moe_mlp_dim"] == 2048):
                         # Preserve the traced fwd/dlhs/down tiles. Split the
