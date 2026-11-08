@@ -11,6 +11,10 @@ CSA_HEAD_CHUNK_BUDGET = 128 * 1024**2
 LOGITS_TILE_ALIGNMENT = 128
 
 
+def use_short_context_tuning(length, per_device_batch, device_count):
+    return device_count == 1 and length <= 1024 and per_device_batch * length <= 32768
+
+
 def aligned_logits_tiles(tokens, limit):
     """Choose the largest tile count within the limit that divides aligned tokens."""
     if not tokens or tokens % LOGITS_TILE_ALIGNMENT:
@@ -149,12 +153,12 @@ def generate(out, tokenizer, output_root, run_prefix, device_count=1, curriculum
                 logits_dot_in_fp32=False,
                 num_vocab_tiling=16,
             )
-            if device_count == 1 and length <= 1024 and s["per_device_microbatch"] * length <= 32768:
+            if use_short_context_tuning(length, s["per_device_microbatch"], device_count):
                 # Each tile updates the full tied embedding gradient. Use fewer
                 # updates where the measured short-context workload has headroom.
                 cfg["num_vocab_tiling"] = 8
                 if cfg.get("prefuse_moe_weights"):
-                    cfg.update(moe_mlpwi_0="device", moe_mlpwi_1="device")
+                    cfg.update(moe_mlpwi_0="device", moe_mlpwi_1="device", moe_mlpwo="device")
         s["memory_components"] = memory_components(cfg, s)
         cfg["base_config"] = str(base_path)
         cfg.update(

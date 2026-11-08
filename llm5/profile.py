@@ -8,7 +8,7 @@ from tempfile import TemporaryDirectory
 from uuid import uuid4
 
 from llm5 import launch, streaming
-from llm5.plan import aligned_logits_tiles, generate, read_json
+from llm5.plan import aligned_logits_tiles, generate, read_json, use_short_context_tuning
 from llm5.train import configure_tpu, run_training_config
 
 MATH_FRACTION = 0.05
@@ -81,8 +81,11 @@ def main(argv=None):
                     "indexer_topk": cfg["indexer_topk"],
                     "prefuse_moe_weights": cfg["prefuse_moe_weights"],
                     "moe_up_projections_saved": cfg.get("moe_mlpwi_0") == cfg.get("moe_mlpwi_1") == "device",
+                    "moe_down_projection_saved": cfg.get("moe_mlpwo") == "device",
                     "mhc_lite": cfg["enable_mhc_lite"],
                     "mhc_lite_pallas": cfg["use_mhc_pallas_kernel"],
+                    "mhc_pre_saved": (cfg["use_mhc_pallas_kernel"]
+                                      and use_short_context_tuning(args.length, stage["per_device_microbatch"], device_count)),
                     "logits_dot_in_fp32": cfg["logits_dot_in_fp32"],
                     "math": MATH_FRACTION, "code": CODE_FRACTION}
         (output_dir / "profile-config.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")

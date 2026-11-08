@@ -343,8 +343,34 @@ def install_mhc_low_memory():
 def install_mhc_pallas_tracer_compat():
     """Allow permutation arrays to be traced through the mHC Pallas VJP."""
     import jax
+    from jax.ad_checkpoint import checkpoint_name
     from maxtext.kernels.mhc import mhc_kernels_fwd, mhc_kernels_bwd
-    from maxtext.layers import mhc
+    from maxtext.layers import mhc, nnx_decoders
+    from llm5.plan import use_short_context_tuning
+
+    decoder = nnx_decoders.NNXDecoder
+    native_policy = decoder.get_remat_policy
+    if not getattr(native_policy, "_llm5_mhc_pre", False):
+        save_pre = jax.checkpoint_policies.save_only_these_names("llm5_mhc_pre")
+
+        @wraps(native_policy)
+        def get_remat_policy(self):
+            policy = native_policy(self)
+            cfg = self.config
+            if (not cfg.use_mhc_pallas_kernel or policy is None
+                    or (getattr(self, "remat_policy_override", None) or cfg.remat_policy) != "custom"
+                    or not use_short_context_tuning(cfg.max_target_length, cfg.per_device_batch_size, self.mesh.size)):
+                return policy
+
+            def keep_mhc_pre(primitive, *args, **params):
+                if save_pre(primitive, *args, **params):
+                    return True
+                return policy(primitive, *args, **params)
+
+            return keep_mhc_pre
+
+        get_remat_policy._llm5_mhc_pre = True
+        decoder.get_remat_policy = get_remat_policy
 
     native_permutations = mhc.get_permutation_matrices
     if not getattr(native_permutations, "_llm5_concrete_permutations", False):
@@ -360,7 +386,7 @@ def install_mhc_pallas_tracer_compat():
         get_permutation_matrices._llm5_concrete_permutations = True
         mhc.get_permutation_matrices = get_permutation_matrices
 
-    if getattr(mhc_kernels_fwd._pre_op, "_llm5_tracer_compat", False):
+    if getattr(mhc_kernels_fwd._pre_op, "_llm5_mhc_pre", False):
         return
 
     @partial(jax.custom_vjp, nondiff_argnums=(0,))
@@ -369,7 +395,15 @@ def install_mhc_pallas_tracer_compat():
         return layer_input, context
 
     def forward(config, x, permutations, weights):
-        output, saved = mhc_kernels_fwd.pre_fwd(x, weights, permutations, config)
+        (layer_input, (streams, h_post, residual)), saved = mhc_kernels_fwd.pre_fwd(x, weights, permutations, config)
+
+        def keep(value):
+            return checkpoint_name(value, "llm5_mhc_pre")
+
+        # The streams are already inputs to pre_fwd. Retain the branch input
+        # and coefficients so the backward pass can reuse both pre kernels.
+        output = (keep(layer_input), (streams, keep(h_post), keep(residual)))
+        saved = jax.tree.map(keep, saved)
         return output, (saved, x, permutations, weights)
 
     def backward(config, residuals, cotangents):
@@ -380,7 +414,7 @@ def install_mhc_pallas_tracer_compat():
         return dx, None, dweights
 
     pre_op.defvjp(forward, backward)
-    pre_op._llm5_tracer_compat = True
+    pre_op._llm5_mhc_pre = True
     mhc_kernels_fwd._pre_op = pre_op
 
 
