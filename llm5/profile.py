@@ -81,7 +81,8 @@ def main(argv=None):
                     "indexer_topk": cfg["indexer_topk"],
                     "prefuse_moe_weights": cfg["prefuse_moe_weights"],
                     "moe_up_projections_saved": cfg.get("moe_mlpwi_0") == cfg.get("moe_mlpwi_1") == "device",
-                    "moe_down_projection_saved": cfg.get("moe_mlpwo") == "device",
+                    "moe_sorted_input_saved": cfg.get("moe_x_sorted") == "device",
+                    "splash_context_saved": cfg.get("context") == "device",
                     "mhc_lite": cfg["enable_mhc_lite"],
                     "mhc_lite_pallas": cfg["use_mhc_pallas_kernel"],
                     "mhc_pre_saved": (cfg["use_mhc_pallas_kernel"]

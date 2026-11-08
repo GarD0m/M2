@@ -157,8 +157,9 @@ def generate(out, tokenizer, output_root, run_prefix, device_count=1, curriculum
                 # Each tile updates the full tied embedding gradient. Use fewer
                 # updates where the measured short-context workload has headroom.
                 cfg["num_vocab_tiling"] = 8
+                cfg["context"] = "device"
                 if cfg.get("prefuse_moe_weights"):
-                    cfg.update(moe_mlpwi_0="device", moe_mlpwi_1="device", moe_mlpwo="device")
+                    cfg.update(moe_mlpwi_0="device", moe_mlpwi_1="device", moe_x_sorted="device")
         s["memory_components"] = memory_components(cfg, s)
         cfg["base_config"] = str(base_path)
         cfg.update(

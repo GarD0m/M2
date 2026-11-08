@@ -9,11 +9,11 @@ def single_pass_tiled_loss(model, hidden_states, data, config):
     import jax
     import jax.numpy as jnp
     from flax import nnx
-    from maxtext.utils import max_utils
     from maxtext.utils.vocabulary_tiling import _is_output_head_param_path
 
     graphdef, head, other, rest = nnx.split(model, _is_output_head_param_path, nnx.Param, ...)
     tiles = config.num_vocab_tiling
+    z_multiplier = config.z_loss_multiplier
 
     def scan_loss(head, other, rest, hidden, labels, segmentation, differentiate):
         def project(params, x):
@@ -23,23 +23,34 @@ def single_pass_tiled_loss(model, hidden_states, data, config):
         def body(carry, tile):
             losses, head_grad = carry
             x, targets, mask = tile
-            targets = jax.nn.one_hot(targets, config.vocab_size)
             mask = mask != 0
-
-            def terms(logits):
-                loss, z_loss = max_utils.cross_entropy_with_logits(logits, targets, config.z_loss_multiplier)
-                return jnp.sum(loss * mask), jnp.sum(z_loss * mask)
-
             if differentiate:
                 logits, project_vjp = jax.vjp(project, head, x)
-                (loss, z_loss), loss_vjp = jax.vjp(terms, logits)
-                (dlogits,) = loss_vjp((1.0, 0.0))
+            else:
+                logits = project(head, x)
+
+            row_max = logits.max(axis=-1)
+            exp_shifted = jnp.exp(logits - row_max[:, None])
+            sum_exp = exp_shifted.sum(axis=-1)
+            log_sum = jnp.log(sum_exp)
+            log_z = row_max + log_sum
+            vocab = logits.shape[-1]
+            valid_targets = (targets >= 0) & (targets < vocab)
+            # Only one logit per row contributes to the label term. Gather
+            # before centering to avoid reducing a dense one-hot target.
+            target_logits = jnp.take_along_axis(logits, jnp.clip(targets, 0, vocab - 1)[:, None], axis=-1)[:, 0]
+            z_loss = z_multiplier * jax.lax.square(log_z)
+            xent = jnp.where(valid_targets, log_sum - (target_logits - row_max), 0.0) + z_loss
+
+            if differentiate:
+                scale = (1 + 2 * z_multiplier * log_z)[:, None]
+                target_matches = targets[:, None] == jnp.arange(vocab)
+                dlogits = (scale * exp_shifted / sum_exp[:, None] - target_matches) * mask[:, None]
                 head_update, dx = project_vjp(dlogits)
                 head_grad = jax.tree.map(jnp.add, head_grad, head_update)
             else:
-                loss, z_loss = terms(project(head, x))
                 dx = None
-            return ((losses[0] + loss, losses[1] + z_loss), head_grad), dx
+            return ((losses[0] + jnp.sum(xent * mask), losses[1] + jnp.sum(z_loss * mask)), head_grad), dx
 
         zero = jnp.zeros((), dtype=jnp.float32)
         head_grad = jax.tree.map(jnp.zeros_like, head) if differentiate else None
