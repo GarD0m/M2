@@ -85,6 +85,8 @@ TensorBoard 只寫入訓練 loss、整次驗證的平均 loss、學習率和每�
 
 單裝置短序列的 MoE 直接以專家順序計算輸出梯度，省去 token 順序的大型梯度暫存與一次反向排序。Optax Muon 採五輪 Polar Express 正交化，取代 MaxText DeepSeek V4 預設的十輪 Newton–Schulz，會改變更新數值與 optimizer state 的係數形狀。[Polar Express 論文](https://arxiv.org/abs/2505.16932) · [nanochat 係數](https://github.com/karpathy/nanochat/blob/master/nanochat/optim.py)
 
+在 1K／microbatch 32 的 mHC-lite，原本分開的 `_pre_apply_bwd` 和 `_coeff_bwd` 佔 0.367 秒／步。兩個階段現在在同一個 Pallas kernel 內完成，共用 stream 輸入，並在 VMEM 內接續累加 activation 梯度。按 trace 的張量尺寸估算，每次呼叫省去 1.5 GiB 的 HBM 讀寫。
+
 程式會印出本次 TensorBoard logdir，位於 `runs/profiles/<測試識別碼>/tensorboard`；XProf trace 位於該目錄的 `plugins/profile/`，編譯時的 HLO 文字與 protobuf dump 則位於同一測試目錄的 `hlo/`。在 Colab 安裝 `xprof`（`%pip install xprof`），以該 logdir 開啟 XProf 的 **Trace Viewer** 等工具，分析主機、TPU kernel 與運算時間；HLO 檔案可另用於檢查編譯結果。測試仍會執行 loss 與梯度計算，但不將訓練指標寫入 TensorBoard。檔案留在 Colab runtime 本機，HLO dump 可能佔用大量空間。
 
 HLO dump 的 XLA 設定必須在 JAX 後端初始化前生效。請在新的 Colab runtime 執行 profiler；每次重新執行 profiler 或切換回正式訓練前，也請重新啟動 runtime。Profiler 會停用該程序的 JAX 編譯快取以確保重新編譯，並保留原有的 `XLA_FLAGS`；若其中已設定 `--xla_dump_to`，需先移除該項。

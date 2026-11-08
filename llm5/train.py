@@ -373,6 +373,7 @@ def install_mhc_pallas_tracer_compat():
     from jax.ad_checkpoint import checkpoint_name
     from maxtext.kernels.mhc import mhc_kernels_fwd, mhc_kernels_bwd
     from maxtext.layers import mhc, nnx_decoders
+    from llm5.mhc import fused_pre_backward, use_fused_pre_backward
     from llm5.plan import use_short_context_tuning
 
     decoder = nnx_decoders.NNXDecoder
@@ -440,9 +441,12 @@ def install_mhc_pallas_tracer_compat():
 
     def backward(config, residuals, cotangents):
         saved, x, permutations, weights = residuals
-        dx, dweights = mhc_kernels_bwd.pre_op_bwd(
-            config, permutations, (saved, (x, weights)), cotangents
-        )
+        if use_fused_pre_backward(x.shape, config.bwd_block_size):
+            dx, dweights = fused_pre_backward(config, permutations, saved, x, weights, cotangents)
+        else:
+            dx, dweights = mhc_kernels_bwd.pre_op_bwd(
+                config, permutations, (saved, (x, weights)), cotangents
+            )
         return dx, None, dweights
 
     pre_op.defvjp(forward, backward)

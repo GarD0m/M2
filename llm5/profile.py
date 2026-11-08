@@ -8,6 +8,7 @@ from tempfile import TemporaryDirectory
 from uuid import uuid4
 
 from llm5 import launch, streaming
+from llm5.mhc import use_fused_pre_backward
 from llm5.plan import aligned_logits_tiles, generate, read_json, use_short_context_tuning
 from llm5.train import POLAR_EXPRESS_COEFFICIENTS, configure_tpu, run_training_config
 
@@ -75,6 +76,7 @@ def main(argv=None):
         tile_limit = cfg["num_vocab_tiling"]
         effective_tiles = aligned_logits_tiles(args.length * stage["per_device_microbatch"], tile_limit)
         short_context = use_short_context_tuning(args.length, stage["per_device_microbatch"], device_count)
+        mhc_shape = (args.microbatch, args.length, cfg["mhc_expansion_rate"], cfg["base_emb_dim"])
         metadata = {"length": args.length, "global_microbatch": args.microbatch, "ga": args.ga,
                     "device_count": device_count, "device_kind": device_kind, "warmup_steps": args.warmup_steps,
                     "profile_steps": args.profile_steps, "vocab_tiles": tile_limit,
@@ -94,6 +96,8 @@ def main(argv=None):
                     "moe_up_weight_grad_tile": (None if cfg["use_gmm_v2_heuristic_tiling"]
                                                 else cfg["wi_tile_drhs_mlp_dim"]),
                     "mhc_pre_saved": short_context and cfg["use_mhc_pallas_kernel"],
+                    "mhc_pre_bwd_fused": (device_count == 1 and cfg["use_mhc_pallas_kernel"]
+                                         and use_fused_pre_backward(mhc_shape, cfg.get("mhc_pallas_kernel_bwd_block_size", 128))),
                     "logits_dot_in_fp32": cfg["logits_dot_in_fp32"],
                     "math": MATH_FRACTION, "code": CODE_FRACTION}
         (output_dir / "profile-config.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
