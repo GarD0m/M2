@@ -74,6 +74,7 @@ def main(argv=None):
         output_dir.mkdir(parents=True, exist_ok=True)
         tile_limit = cfg["num_vocab_tiling"]
         effective_tiles = aligned_logits_tiles(args.length * stage["per_device_microbatch"], tile_limit)
+        short_context = use_short_context_tuning(args.length, stage["per_device_microbatch"], device_count)
         metadata = {"length": args.length, "global_microbatch": args.microbatch, "ga": args.ga,
                     "device_count": device_count, "device_kind": device_kind, "warmup_steps": args.warmup_steps,
                     "profile_steps": args.profile_steps, "vocab_tiles": tile_limit,
@@ -81,6 +82,7 @@ def main(argv=None):
                     "csa_head_chunk": cfg["csa_qk_head_chunk_size"],
                     "native_csa_mask": False,
                     "indexer_topk": cfg["indexer_topk"],
+                    "csa_indexer_saved": short_context and cfg["use_csa_streamindex_kernel"],
                     "prefuse_moe_weights": cfg["prefuse_moe_weights"],
                     "moe_up_projections_saved": cfg.get("moe_mlpwi_0") == cfg.get("moe_mlpwi_1") == "device",
                     "moe_sorted_input_saved": cfg.get("moe_x_sorted") == "device",
@@ -90,8 +92,7 @@ def main(argv=None):
                     "mhc_bwd_feature_tile": cfg.get("mhc_pallas_kernel_bwd_feature_block_size", 1024),
                     "moe_up_weight_grad_tile": (None if cfg["use_gmm_v2_heuristic_tiling"]
                                                 else cfg["wi_tile_drhs_mlp_dim"]),
-                    "mhc_pre_saved": (cfg["use_mhc_pallas_kernel"]
-                                      and use_short_context_tuning(args.length, stage["per_device_microbatch"], device_count)),
+                    "mhc_pre_saved": short_context and cfg["use_mhc_pallas_kernel"],
                     "logits_dot_in_fp32": cfg["logits_dot_in_fp32"],
                     "math": MATH_FRACTION, "code": CODE_FRACTION}
         (output_dir / "profile-config.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")

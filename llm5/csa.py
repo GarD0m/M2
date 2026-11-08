@@ -1,4 +1,4 @@
-"""Avoid gathering a dense validity mask at the selected CSA indices.
+"""Build StreamIndex masks in block order and reuse them during remat.
 
 Training projections and pooling are adapted from MaxText 0.2.5,
 copyright 2023–2026 Google LLC, Apache-2.0 (see LICENSES/MaxText-LICENSE.txt).
@@ -6,9 +6,28 @@ copyright 2023–2026 Google LLC, Apache-2.0 (see LICENSES/MaxText-LICENSE.txt).
 from functools import wraps
 
 
+def _top_k_membership(scores, k):
+    import jax
+    import jax.numpy as jnp
+
+    if k == 0:
+        return jnp.zeros_like(scores, dtype=jnp.bool_)
+    values, indices = jax.lax.top_k(scores, k)
+
+    def ordered_bits(value):
+        bits = jax.lax.bitcast_convert_type(value, jnp.int32)
+        return bits ^ ((bits >> 31) & 0x7fffffff)
+
+    # Match XLA's F32 total order (including signed zero) and its index tie break.
+    cutoff = ordered_bits(values[..., -1:])
+    scores = ordered_bits(scores)
+    return (scores > cutoff) | ((scores == cutoff) & (jnp.arange(scores.shape[-1]) <= indices[..., -1:]))
+
+
 def install_streamindex_mask():
     import jax
     import jax.numpy as jnp
+    from jax.ad_checkpoint import checkpoint_name
     from maxtext.layers import attention_compressed as csa
 
     native = csa.DeepseekV4CSACompressor.__call__
@@ -62,11 +81,13 @@ def install_streamindex_mask():
             scores = scores + segment_mask
             invalid = invalid | (segment_mask < csa.DEFAULT_MASK_VALUE / 2)
 
-        # The consumer needs a dense mask. Intersect with validity in block order
-        # after building membership, instead of gathering validity in top-k order.
-        indices = jax.lax.top_k(scores, min(indexer.index_topk, width))[1]
-        selected = jnp.any(indices[..., None] == jnp.arange(width), axis=-2)
-        mask = jnp.where(selected & ~invalid, 0.0, csa.DEFAULT_MASK_VALUE).astype(self.dtype)
+        keep = ~invalid
+        if indexer.index_topk < width:
+            keep = keep & _top_k_membership(scores, indexer.index_topk)
+        keep = checkpoint_name(keep, "llm5_csa_indexer")
+        mask = jnp.where(keep, 0.0, csa.DEFAULT_MASK_VALUE).astype(self.dtype)
+        if return_indexer_scores:
+            scores = checkpoint_name(scores, "llm5_csa_indexer")
         compressed = pool(self, hidden_states, position_ids, self.head_dim)
         return compressed[:, :, None, :], mask[:, None, :, :], scores if return_indexer_scores else None
 

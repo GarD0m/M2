@@ -45,9 +45,12 @@ def single_pass_tiled_loss(model, hidden_states, data, config):
         xent = jnp.where(valid_targets, log_sum - (target_logits.astype(jnp.float32) - row_max), 0.0) + z_loss
         dlogits = None
         if differentiate:
-            scale = (1 + 2 * z_multiplier * log_z)[:, None]
-            target_matches = targets[:, None] == jnp.arange(vocab)
-            dlogits = ((scale * exp_shifted / sum_exp[:, None] - target_matches) * mask[:, None]).astype(logits.dtype)
+            # Divide and apply the token mask once per row, before broadcasting
+            # into the vocabulary-wide fusion that writes the BF16 gradients.
+            scale = jnp.where(mask, (1 + 2 * z_multiplier * log_z) / sum_exp, 0.0)
+            active_targets = jnp.where(mask, targets, -1)
+            target_matches = active_targets[:, None] == jnp.arange(vocab)
+            dlogits = (exp_shifted * scale[:, None] - target_matches).astype(logits.dtype)
         return (jnp.sum(xent * mask), jnp.sum(z_loss * mask)), dlogits
 
     def scan_loss(head, other, rest, hidden, labels, segmentation, differentiate):

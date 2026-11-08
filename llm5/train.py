@@ -362,7 +362,7 @@ def install_mhc_pallas_tracer_compat():
                     or not use_short_context_tuning(cfg.max_target_length, cfg.per_device_batch_size, self.mesh.size)):
                 return policy
 
-            names = ["llm5_moe_token_order"]
+            names = ["llm5_moe_token_order", "llm5_csa_indexer"]
             if cfg.use_mhc_pallas_kernel:
                 names.append("llm5_mhc_pre")
             save = jax.checkpoint_policies.save_only_these_names(*names)
