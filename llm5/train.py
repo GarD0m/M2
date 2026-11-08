@@ -462,7 +462,7 @@ def install_moe_route_reuse(moe):
 
 
 def install_aligned_logits_tiles(trainer):
-    from maxtext.common.common_types import ShardMode
+    from maxtext.common.common_types import DecoderBlockType, ShardMode
     from maxtext.configs.pyconfig import HyperParameters
     from llm5.logits import single_pass_tiled_loss
     from llm5.plan import aligned_logits_tiles
@@ -479,7 +479,8 @@ def install_aligned_logits_tiles(trainer):
     def loss(model, hidden_states, data, config, is_train):
         tokens = math.prod(hidden_states.shape[:-1])
         tile_limit = config.num_vocab_tiling
-        if config.decoder_block == "deepseek4":
+        deepseek4 = config.decoder_block in (DecoderBlockType.DEEPSEEK4, "deepseek4")
+        if deepseek4:
             data_shards = max(1, config.ici_data_parallelism) * max(1, config.dcn_data_parallelism)
             if tokens % data_shards == 0:
                 tokens //= data_shards
@@ -493,7 +494,7 @@ def install_aligned_logits_tiles(trainer):
                 config = HyperParameters(config._pydantic_config.model_copy(update=update))
             else:
                 config = config.model_copy(update=update)
-        if (is_train and config.decoder_block == "deepseek4" and model.mesh.size == 1
+        if (is_train and deepseek4 and model.mesh.size == 1
                 and config.shard_mode == ShardMode.AUTO and config.logits_via_embedding and config.cast_logits_to_fp32
                 and not config.enable_dropout and not config.vocab_tiling_ag_once
                 and not config.parameter_memory_host_offload):

@@ -149,6 +149,11 @@ def generate(out, tokenizer, output_root, run_prefix, device_count=1, curriculum
                 logits_dot_in_fp32=False,
                 num_vocab_tiling=16,
             )
+            # The measured 1K workload has room to keep the fused gate/up
+            # outputs (1.50 GiB across both layers at 32K tokens per microbatch).
+            if (device_count == 1 and cfg.get("prefuse_moe_weights") and length <= 1024
+                    and s["per_device_microbatch"] * length <= 32768):
+                cfg.update(moe_mlpwi_0="device", moe_mlpwi_1="device")
         s["memory_components"] = memory_components(cfg, s)
         cfg["base_config"] = str(base_path)
         cfg.update(

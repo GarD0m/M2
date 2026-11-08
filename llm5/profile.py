@@ -80,6 +80,7 @@ def main(argv=None):
                     "native_csa_mask": False,
                     "indexer_topk": cfg["indexer_topk"],
                     "prefuse_moe_weights": cfg["prefuse_moe_weights"],
+                    "moe_up_projections_saved": cfg.get("moe_mlpwi_0") == cfg.get("moe_mlpwi_1") == "device",
                     "mhc_lite": cfg["enable_mhc_lite"],
                     "mhc_lite_pallas": cfg["use_mhc_pallas_kernel"],
                     "logits_dot_in_fp32": cfg["logits_dot_in_fp32"],
