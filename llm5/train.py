@@ -384,6 +384,35 @@ def install_mhc_pallas_tracer_compat():
     mhc_kernels_fwd._pre_op = pre_op
 
 
+def install_deepseek4_rope():
+    """Rotate adjacent channels without strided slices and their gradient pads."""
+    import jax
+    import jax.numpy as jnp
+    from maxtext.layers import embeddings
+
+    native = embeddings._apply_rotary_pos_emb
+    if getattr(native, "_llm5_pairwise_rope", False):
+        return
+
+    @wraps(native)
+    def apply(x, cos, sin, unsqueeze_dim=1):
+        rope_dim = 2 * cos.shape[-1]
+        if not 0 < rope_dim <= x.shape[-1]:
+            return native(x, cos, sin, unsqueeze_dim=unsqueeze_dim)
+        if unsqueeze_dim is not None:
+            cos = jnp.expand_dims(cos, axis=unsqueeze_dim)
+            sin = jnp.expand_dims(sin, axis=unsqueeze_dim)
+        nope, rope = x[..., :-rope_dim], x[..., -rope_dim:]
+        pairs = rope.reshape((*rope.shape[:-1], rope_dim // 2, 2))
+        swapped = jax.lax.rev(pairs, (pairs.ndim - 1,)).astype(jnp.float32)
+        signs = jnp.array([-1, 1], dtype=jnp.float32)
+        rotated = pairs.astype(jnp.float32) * cos[..., None] + swapped * (sin[..., None] * signs)
+        return jnp.concatenate((nope, rotated.reshape(rope.shape).astype(x.dtype)), axis=-1)
+
+    apply._llm5_pairwise_rope = True
+    embeddings._apply_rotary_pos_emb = apply
+
+
 def install_deepseek4_support():
     from types import SimpleNamespace
     from flax import nnx
@@ -392,6 +421,7 @@ def install_deepseek4_support():
 
     install_mhc_low_memory()
     install_mhc_pallas_tracer_compat()
+    install_deepseek4_rope()
     install_moe_route_reuse(moe)
     decoder = nnx_decoders.NNXDecoder
     native = decoder._apply_deepseek4_scanned_blocks

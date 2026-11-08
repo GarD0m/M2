@@ -25,9 +25,9 @@ os.environ["JAX_PLATFORMS"] = "tpu"
 os.environ["JAX_COMPILATION_CACHE_DIR"] = "/content/jax-cache"
 ```
 
-自訂 remat 在 TPU 上保留 Q/KV projections 和 MoE top-k 路由索引。單裝置在序列長度不超過 1024、每 microbatch 不超過 32768 tokens 時，也保留 MoE 合併上投影的輸出供反向重用。MoE 反向重用排序索引，前後向 gather 使用已知在範圍內的索引，router 梯度採用 MaxText 的 dense VJP。模型參數與 optimizer state 也留在 TPU。單裝置下，CSA teacher 在 1K／2K 分別以 4／2 heads 為一組，4K 起每組 1 head。訓練的 logits 最多分成 16 塊；單裝置每 microbatch 32768 tokens 時，每塊為 2048 tokens，單一 FP32 logits 張量為 512 MiB。分塊按每個 data shard 的 token 數選擇，優先讓每塊對齊 128 tokens；驗證依 batch 縮減分塊數。mHC RMSNorm 和 HyperHead 的大型運算元使用 BF16，歸約保留 FP32。
+自訂 remat 在 TPU 上保留 Q/KV projections 和 MoE top-k 路由索引。單裝置在序列長度不超過 1024、每 microbatch 不超過 32768 tokens 時，也保留 MoE 合併上投影的輸出供反向重用。MoE 反向重用排序索引，前後向 gather 使用已知在範圍內的索引，router 梯度採用 MaxText 的 dense VJP。模型參數與 optimizer state 也留在 TPU。單裝置下，CSA teacher 在 1K／2K 分別以 4／2 heads 為一組，4K 起每組 1 head。符合上述短序列條件時，logits 最多分 8 塊，減少完整詞表梯度的累加次數。其他階段最多分 16 塊。每 microbatch 32768 tokens 時，單塊 FP32 logits 分別是 1 GiB 和 512 MiB。分塊優先讓每塊對齊 128 tokens，驗證依 batch 縮減分塊數。mHC RMSNorm 和 HyperHead 的大型運算元使用 BF16，歸約保留 FP32。
 
-CSA indexer 每個 token 最多選取 32 個壓縮區塊。無 cache 的 StreamIndex 訓練路徑沿用原有 top-k 排序，直接在區塊順序中套用 causal 與 segment 限制，省去逐列擷取 top-k 有效性。logits 投影使用 BF16 輸出，交叉熵仍轉為 FP32 計算。單裝置訓練在每個分塊內共用 loss 與梯度所需的投影，減少一次矩陣乘法。
+CSA indexer 每個 token 最多選取 32 個壓縮區塊。無 cache 的 StreamIndex 訓練路徑沿用原有 top-k 排序，直接在區塊順序中套用 causal 與 segment 限制，省去逐列擷取 top-k 有效性。DeepSeek V4 RoPE 直接成對旋轉相鄰通道，省去拆分奇偶通道的跨步切片與反向補零。logits 投影使用 BF16 輸出，交叉熵仍轉為 FP32 計算。單裝置訓練在每個分塊內共用 loss 與梯度所需的投影和交叉熵歸約。
 
 mHC-lite 使用排列矩陣混合殘差。符合分塊條件的單裝置階段使用融合 Pallas 核心，其餘階段使用 MaxText 的 mHC-lite JAX 路徑。mHC-lite 改變殘差參數形狀，新訓練使用獨立的 checkpoint 路徑。
 
@@ -79,7 +79,7 @@ TensorBoard 只寫入訓練 loss、整次驗證的平均 loss、學習率和每�
 
 預設測量 1K／microbatch 32／GA 16，先暖機一步，再擷取一步。可用 `--length`、`--microbatch`、`--ga`、`--warmup-steps` 和 `--profile-steps` 調整。Microbatch 是全域 sequence 數，須能被 TPU 裝置數整除。模型設定與正式訓練相同，資料比例固定為 5% 數學與 15% 程式碼。每次測試使用新的本機目錄，不讀取或儲存訓練 checkpoint，也不上傳 Hub。
 
-既有單裝置 1K／microbatch 32／GA 16 trace 中，`20261108-144410-1e766245-test` 使用 mHC-lite 和 MoE gate/up 合併，實測 **13.872 秒／步**，HLO 預設記憶體配置為 15.03 GiB。較早的 `20261107-173241-e0a86703-test` 平均為 13.984 秒／步。最新 trace 的 HLO 顯示 logits 仍走 MaxText 的兩次投影。下一次量測可直接和 **13.872 秒／步**比較，驗證單次 logits 投影與 MoE 上投影重用的整體效果。
+單裝置 1K／microbatch 32／GA 16 的 `20261108-145711-133c32c5-test` 啟用單次 logits 投影與 MoE 上投影重用，實測 **12.426 秒／步**，比上一筆 13.872 秒／步縮短約 10.4%。HLO 預設記憶體配置為 15.11 GiB。Trace 中 RoPE 奇偶通道重排及其反向算子累計約 2.12 秒／步。下一次量測可直接和 **12.426 秒／步**比較，確認成對 RoPE、交叉熵歸約重用與較少 logits 分塊的整體步時和記憶體。
 
 程式會印出本次 TensorBoard logdir，位於 `runs/profiles/<測試識別碼>/tensorboard`；XProf trace 位於該目錄的 `plugins/profile/`，編譯時的 HLO 文字與 protobuf dump 則位於同一測試目錄的 `hlo/`。在 Colab 安裝 `xprof`（`%pip install xprof`），以該 logdir 開啟 XProf 的 **Trace Viewer** 等工具，分析主機、TPU kernel 與運算時間；HLO 檔案可另用於檢查編譯結果。測試仍會執行 loss 與梯度計算，但不將訓練指標寫入 TensorBoard。檔案留在 Colab runtime 本機，HLO dump 可能佔用大量空間。
 

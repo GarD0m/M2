@@ -32,16 +32,13 @@ def single_pass_tiled_loss(model, hidden_states, data, config):
 
             if differentiate:
                 logits, project_vjp = jax.vjp(project, head, x)
-                _, loss_vjp = jax.vjp(terms, logits)
+                (loss, z_loss), loss_vjp = jax.vjp(terms, logits)
                 (dlogits,) = loss_vjp((1.0, 0.0))
                 head_update, dx = project_vjp(dlogits)
                 head_grad = jax.tree.map(jnp.add, head_grad, head_update)
             else:
-                logits = project(head, x)
+                loss, z_loss = terms(project(head, x))
                 dx = None
-            # Use the native primal loss for the metrics. It shares this tile's
-            # projection and keeps the same reduction order as MaxText.
-            loss, z_loss = terms(logits)
             return ((losses[0] + loss, losses[1] + z_loss), head_grad), dx
 
         zero = jnp.zeros((), dtype=jnp.float32)
