@@ -79,6 +79,9 @@ def main(argv=None):
                     "csa_head_chunk": cfg["csa_qk_head_chunk_size"],
                     "native_csa_mask": False,
                     "indexer_topk": cfg["indexer_topk"],
+                    "prefuse_moe_weights": cfg["prefuse_moe_weights"],
+                    "mhc_lite": cfg["enable_mhc_lite"],
+                    "mhc_lite_pallas": cfg["use_mhc_pallas_kernel"],
                     "logits_dot_in_fp32": cfg["logits_dot_in_fp32"],
                     "math": MATH_FRACTION, "code": CODE_FRACTION}
         (output_dir / "profile-config.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
@@ -86,7 +89,8 @@ def main(argv=None):
               f"global microbatch={stage['microbatch']}, GA={stage['accumulation']}, "
               f"warmup={args.warmup_steps}, profile steps={args.profile_steps}, "
               f"vocab tiles={effective_tiles}/{tile_limit}, CSA head chunk={cfg['csa_qk_head_chunk_size']}, "
-              f"indexer top-k={cfg['indexer_topk']}", flush=True)
+              f"indexer top-k={cfg['indexer_topk']}, mHC-lite Pallas={cfg['use_mhc_pallas_kernel']}, "
+              f"fused MoE gate/up={cfg['prefuse_moe_weights']}", flush=True)
         print(f"TensorBoard logdir: {cfg['base_output_directory']}/{cfg['run_name']}/tensorboard", flush=True)
         print(f"HLO dump: {Path(hlo_dir).resolve()}", flush=True)
         run_training_config(config_path, record_metrics=False)

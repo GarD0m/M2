@@ -96,6 +96,8 @@ def generate(out, tokenizer, output_root, run_prefix, device_count=1, curriculum
     raw = read_json(ROOT / "configs/curriculum.json") if curriculum_config is None else curriculum_config
     stages = curriculum(raw, device_count)
     model = read_json(ROOT / "configs/model.json")
+    base_path = ROOT / "configs/maxtext-base.json"
+    base = read_json(base_path)
     out = Path(out).resolve()
     out.mkdir(parents=True, exist_ok=True)
     tokenizer = Path(tokenizer).resolve()
@@ -120,6 +122,14 @@ def generate(out, tokenizer, output_root, run_prefix, device_count=1, curriculum
                 heads for heads in range(1, min(head_limit, head_divisor) + 1)
                 if head_divisor % heads == 0
             )
+            mhc_token_tile = math.lcm(
+                cfg.get("mhc_pallas_kernel_fwd_block_size", base["mhc_pallas_kernel_fwd_block_size"]),
+                cfg.get("mhc_pallas_kernel_bwd_block_size", base["mhc_pallas_kernel_bwd_block_size"]),
+            )
+            # Align each sequence so both training and evaluation batches work.
+            cfg["use_mhc_pallas_kernel"] = (
+                cfg.get("use_mhc_pallas_kernel", False) and device_count == 1 and length % mhc_token_tile == 0
+            )
             cfg.update(
                 use_csa_streamindex_kernel=True,
                 csa_qk_head_chunk_size=head_chunk,
@@ -132,7 +142,6 @@ def generate(out, tokenizer, output_root, run_prefix, device_count=1, curriculum
                 qkv_proj="device",
                 moe_routing_maps="device",
                 router_topk_matmul_vjp=True,
-                sinkhorn_iterations=10,
                 optimizer_memory_host_offload=False,
                 parameter_memory_host_offload=False,
                 indexer_topk=32,
@@ -141,7 +150,7 @@ def generate(out, tokenizer, output_root, run_prefix, device_count=1, curriculum
                 num_vocab_tiling=16,
             )
         s["memory_components"] = memory_components(cfg, s)
-        cfg["base_config"] = str(ROOT / "configs/maxtext-base.json")
+        cfg["base_config"] = str(base_path)
         cfg.update(
             run_name=f"{run_prefix}-{s['name']}", base_output_directory=output_root,
             max_target_length=s["length"], per_device_batch_size=float(s["per_device_microbatch"]),
@@ -169,7 +178,7 @@ def generate(out, tokenizer, output_root, run_prefix, device_count=1, curriculum
                                        else hashlib.sha256(json.dumps(raw, sort_keys=True).encode()).hexdigest()),
                     sources_sha256=digest(ROOT / "configs/sources.json"),
                     model_sha256=digest(ROOT / "configs/model.json"),
-                    base_sha256=digest(ROOT / "configs/maxtext-base.json"))
+                    base_sha256=digest(base_path))
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return manifest
 

@@ -344,6 +344,21 @@ def install_mhc_pallas_tracer_compat():
     """Allow permutation arrays to be traced through the mHC Pallas VJP."""
     import jax
     from maxtext.kernels.mhc import mhc_kernels_fwd, mhc_kernels_bwd
+    from maxtext.layers import mhc
+
+    native_permutations = mhc.get_permutation_matrices
+    if not getattr(native_permutations, "_llm5_concrete_permutations", False):
+        native_permutations.cache_clear()
+
+        @wraps(native_permutations)
+        def get_permutation_matrices(k):
+            # Train and eval trace separately. The native cache must hold a
+            # concrete constant even when its first caller is inside a trace.
+            with jax.ensure_compile_time_eval():
+                return native_permutations(k)
+
+        get_permutation_matrices._llm5_concrete_permutations = True
+        mhc.get_permutation_matrices = get_permutation_matrices
 
     if getattr(mhc_kernels_fwd._pre_op, "_llm5_tracer_compat", False):
         return
