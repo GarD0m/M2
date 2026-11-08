@@ -18,10 +18,13 @@ def main(argv=None):
     p.add_argument("--hub-repo", default="tim123xyz/Test")
     args = p.parse_args(argv)
     configure_tpu()
+    import jax
+
     streaming.configure(args.tokenizer_batch_size, args.tokenizer_threads)
     device_count = launch.check_runtime()
     manifest = generate(args.plan_dir, args.tokenizer,
-                        args.output_root, args.run_prefix, device_count=device_count)
+                        args.output_root, args.run_prefix, device_count=device_count,
+                        device_kind=jax.devices()[0].device_kind)
     for stage in manifest["stages"]:
         print(f"{stage['name']}: global microbatch={stage['microbatch']}, "
               f"GA={stage['accumulation']}, steps={stage['num_steps']}", flush=True)

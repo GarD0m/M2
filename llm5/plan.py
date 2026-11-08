@@ -9,6 +9,7 @@ MAXTEXT_VERSION = "0.2.5"
 ROOT = Path(__file__).resolve().parents[1]
 CSA_HEAD_CHUNK_BUDGET = 128 * 1024**2
 LOGITS_TILE_ALIGNMENT = 128
+V6E_DEVICE_KINDS = {"TPU v6e", "TPU v6 lite"}
 
 
 def use_short_context_tuning(length, per_device_batch, device_count):
@@ -96,7 +97,7 @@ def memory_components(model, stage):
     }
 
 
-def generate(out, tokenizer, output_root, run_prefix, device_count=1, curriculum_config=None):
+def generate(out, tokenizer, output_root, run_prefix, device_count=1, curriculum_config=None, device_kind=None):
     raw = read_json(ROOT / "configs/curriculum.json") if curriculum_config is None else curriculum_config
     stages = curriculum(raw, device_count)
     model = read_json(ROOT / "configs/model.json")
@@ -160,6 +161,21 @@ def generate(out, tokenizer, output_root, run_prefix, device_count=1, curriculum
                 cfg["context"] = "device"
                 if cfg.get("prefuse_moe_weights"):
                     cfg.update(moe_mlpwi_0="device", moe_mlpwi_1="device", moe_x_sorted="device")
+                    if (device_kind in V6E_DEVICE_KINDS and length == 1024
+                            and s["per_device_microbatch"] == 32 and cfg["dtype"] == "bfloat16"
+                            and cfg["base_emb_dim"] == cfg["base_moe_mlp_dim"] == 2048):
+                        # Preserve the traced fwd/dlhs/down tiles. Split the
+                        # expensive fused up-projection TGMM along its output.
+                        cfg.update(
+                            use_gmm_v2_heuristic_tiling=False,
+                            wi_tile_fwd_batch_seq=128, wi_tile_fwd_embed_dim=2048, wi_tile_fwd_mlp_dim=4096,
+                            wi_tile_dlhs_batch_seq=128, wi_tile_dlhs_embed_dim=2048, wi_tile_dlhs_mlp_dim=4096,
+                            wi_tile_drhs_batch_seq=256, wi_tile_drhs_embed_dim=2048, wi_tile_drhs_mlp_dim=2048,
+                            wo_tile_fwd_batch_seq=128, wo_tile_fwd_embed_dim=2048, wo_tile_fwd_mlp_dim=2048,
+                            wo_tile_dlhs_batch_seq=128, wo_tile_dlhs_embed_dim=2048, wo_tile_dlhs_mlp_dim=2048,
+                            wo_tile_drhs_batch_seq=256, wo_tile_drhs_embed_dim=2048, wo_tile_drhs_mlp_dim=2048,
+                            mhc_pallas_kernel_bwd_feature_block_size=2048,
+                        )
         s["memory_components"] = memory_components(cfg, s)
         cfg["base_config"] = str(base_path)
         cfg.update(

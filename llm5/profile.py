@@ -56,7 +56,8 @@ def main(argv=None):
                               "math": MATH_FRACTION, "code": CODE_FRACTION}]}
     with TemporaryDirectory(prefix="llm5-profile-") as temporary:
         manifest = generate(temporary, "models/tokenizer", "runs/profiles",
-                            run_id, device_count=device_count, curriculum_config=curriculum)
+                            run_id, device_count=device_count, curriculum_config=curriculum,
+                            device_kind=jax.devices()[0].device_kind)
         stage = manifest["stages"][0]
         config_path = Path(stage["config"])
         cfg = read_json(config_path)
@@ -85,6 +86,9 @@ def main(argv=None):
                     "splash_context_saved": cfg.get("context") == "device",
                     "mhc_lite": cfg["enable_mhc_lite"],
                     "mhc_lite_pallas": cfg["use_mhc_pallas_kernel"],
+                    "mhc_bwd_feature_tile": cfg.get("mhc_pallas_kernel_bwd_feature_block_size", 1024),
+                    "moe_up_weight_grad_tile": (None if cfg["use_gmm_v2_heuristic_tiling"]
+                                                else cfg["wi_tile_drhs_mlp_dim"]),
                     "mhc_pre_saved": (cfg["use_mhc_pallas_kernel"]
                                       and use_short_context_tuning(args.length, stage["per_device_microbatch"], device_count)),
                     "logits_dot_in_fp32": cfg["logits_dot_in_fp32"],
