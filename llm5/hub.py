@@ -11,7 +11,7 @@ from huggingface_hub import CommitOperationAdd, HfApi, hf_hub_download, snapshot
 from huggingface_hub.errors import EntryNotFoundError
 from tensorboardX import SummaryWriter
 
-from llm5.cfg import REPO
+from llm5.cfg import NAME, REPO
 from llm5.data import CURSOR
 
 
@@ -29,7 +29,7 @@ class Hub:
         self.pool = ThreadPoolExecutor(max_workers=1)
         self.jobs = []
         self.writer = None
-        self.index = "runs/m2/latest.json"
+        self.index = f"runs/{NAME}/latest.json"
 
     def __enter__(self):
         return self
@@ -64,7 +64,7 @@ class Hub:
             latest = json.loads(Path(path).read_text(encoding="utf-8"))
             remote = latest["step"], latest["run_name"]
             with TemporaryDirectory() as temp:
-                self.download(temp, ["tensorboard/m2-*/events.*"])
+                self.download(temp, [f"tensorboard/{NAME}-*/events.*"])
                 for name in self.cfgs:
                     for src in (Path(temp) / "tensorboard" / name).glob("events.*"):
                         dst = self.dir(name) / "tensorboard" / src.name

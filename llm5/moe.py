@@ -6,9 +6,6 @@ import jax.numpy as jnp
 from flax import nnx
 from jax.ad_checkpoint import checkpoint_name
 
-from llm5.cfg import short
-
-
 def gather(x, ids):
     return x.at[ids].get(mode="promise_in_bounds", wrap_negative_indices=False)
 
@@ -58,17 +55,12 @@ def patch():
     from maxtext.layers import moe
     from maxtext.models import deepseek4
 
-    native = moe.RoutedMoE.unpermute
-
     def unpermute(self, x, perm, w, batch_size, sequence_length, use_custom_sort_vjp=True,
                   group_sizes=None, topk_argsort_indices=None):
-        if short(sequence_length, batch_size, self.mesh.size):
-            w = w.reshape(-1, self.num_experts_per_tok)
-            with jax.named_scope("weight_sum"):
-                y = combine(x, perm, w, jax.lax.Precision(self.config.matmul_precision))
-            return y.reshape(batch_size, sequence_length, -1).astype(self.dtype)
-        return native(self, x, perm, w, batch_size, sequence_length,
-                      use_custom_sort_vjp, group_sizes, topk_argsort_indices)
+        w = w.reshape(-1, self.num_experts_per_tok)
+        with jax.named_scope("weight_sum"):
+            y = combine(x, perm, w, jax.lax.Precision(self.config.matmul_precision))
+        return y.reshape(batch_size, sequence_length, -1).astype(self.dtype)
 
     class Experts(nnx.Module):
         def __init__(self, config, **kwargs):

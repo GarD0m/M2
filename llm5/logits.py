@@ -12,7 +12,7 @@ def loss(model, hidden, data, cfg, count):
 
     graph, head, other, rest = nnx.split(model, _is_output_head_param_path, nnx.Param, ...)
     z = cfg.z_loss_multiplier
-    grouped = count == 16 and short(hidden.shape[1], hidden.shape[0], model.mesh.size)
+    grouped = count == 16 and short(hidden.shape[1], hidden.shape[0])
 
     def softmax(logits, ids, mask, grad):
         mask = mask != 0

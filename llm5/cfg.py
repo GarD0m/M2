@@ -5,6 +5,8 @@ ROOT = Path(__file__).resolve().parents[1]
 TOK = ROOT / "models/tokenizer"
 RUN = ROOT / "runs"
 REPO = "tim123xyz/Test"
+NAME = "m2-32"
+EXPERTS = 32
 
 MODEL = {
     "model_name": 'deepseek4-tiny',
@@ -14,7 +16,7 @@ MODEL = {
     "base_emb_dim": 2048,
     "base_mlp_dim": 2048,
     "base_moe_mlp_dim": 2048,
-    "num_experts": 16,
+    "num_experts": EXPERTS,
     "num_experts_per_tok": 3,
     "prefuse_moe_weights": True,
     "float32_weight_sum": False,
@@ -158,8 +160,8 @@ STAGES = (
 )
 
 
-def short(length, batch, devices):
-    return devices == 1 and length <= 1024 and length * batch <= 32768
+def short(length, batch):
+    return length <= 1024 and length * batch <= 16384
 
 
 def tiles(tokens, limit):
@@ -169,39 +171,47 @@ def tiles(tokens, limit):
     return next(n for n in range(min(blocks, limit), 0, -1) if blocks % n == 0)
 
 
-def configs(devices, root=RUN / "train", prefix="m2", specs=STAGES):
-    ends = []
+def configs(devices, root=RUN / "train", prefix=NAME, specs=STAGES):
+    stages = []
     end = 0
     for length, budget, batch, _, _ in specs:
-        end += max(1, round(budget / ((length - 1) * batch * 16)))
-        ends.append(end)
+        local = max(1, min(batch // devices, 16384 // length))
+        micro = local * devices
+        ga = max(1, round(batch * 16 / micro))
+        end += max(1, round(budget / ((length - 1) * micro * ga)))
+        stages.append((length, local, ga, end))
 
     previous = ""
-    for (length, _, batch, _, _), end in zip(specs, ends):
-        local = batch // devices
+    for length, local, ga, end in stages:
+        tokens = local * length
+        ep_limit = max(2, min(8, 32768 // tokens))
+        ep = max(n for n in range(1, ep_limit + 1) if devices % n == 0 and EXPERTS % n == 0)
         cfg = dict(
             MODEL,
             run_name=f"{prefix}-{length // 1024}k",
             base_output_directory=root.as_posix(),
             max_target_length=length,
             per_device_batch_size=float(local),
-            ici_data_parallelism=devices,
-            gradient_accumulation_steps=16,
+            ici_data_parallelism=devices // ep,
+            ici_expert_parallelism=ep,
+            gradient_accumulation_steps=ga,
             steps=end,
-            learning_rate_schedule_steps=ends[-1],
-            warmup_steps_fraction=64.01 / ends[-1],
+            learning_rate_schedule_steps=stages[-1][-1],
+            warmup_steps_fraction=64.01 / stages[-1][-1],
             tokenizer_path=str(TOK),
             data_shuffle_seed=42,
             init_weights_seed=42,
             load_full_state_path=previous,
             use_mhc_pallas_kernel=devices == 1,
+            optimizer_memory_host_offload=devices == 1 and length == 32768,
+            num_vocab_tiling=16 if devices == 1 else tiles(tokens, max(1, min(16, tokens // 2048))),
         )
         head_bytes = max(local, 1) * length * (length // 4) * 4
         heads = min(8, max(1, (128 * 1024**2) // head_bytes))
         cfg["csa_qk_head_chunk_size"] = 1 << (heads.bit_length() - 1)
-        if short(length, local, devices):
+        if short(length, local):
             cfg.update(context="device", moe_mlpwi_0="device", moe_mlpwi_1="device", moe_x_sorted="device")
-            if (length, local) == (1024, 32):
+            if devices == 1:
                 cfg.update(
                     use_gmm_v2_heuristic_tiling=False,
                     wi_tile_fwd_batch_seq=128, wi_tile_fwd_embed_dim=2048, wi_tile_fwd_mlp_dim=4096,

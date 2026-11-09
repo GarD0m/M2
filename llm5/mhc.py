@@ -8,7 +8,8 @@ from llm5.cfg import short
 
 
 def fast(shape, block_size):
-    return tuple(shape) == (32, 1024, 4, 2048) and block_size == 128
+    batch, length, streams, width = shape
+    return short(length, batch) and length == 1024 and (streams, width, block_size) == (4, 2048, 128)
 
 
 def fused(config, permutations, saved, x, weights, cotangents):
@@ -172,7 +173,7 @@ def patch():
         cfg = self.config
         base = native_policy(self)
         if (getattr(self, "remat_policy_override", None) is None
-                and short(cfg.max_target_length, cfg.per_device_batch_size, self.mesh.size)):
+                and short(cfg.max_target_length, cfg.per_device_batch_size)):
             return lambda op, *args, **kw: save(op, *args, **kw) or base(op, *args, **kw)
         return base
 
