@@ -1,12 +1,3 @@
-.venv/
-.venv-tpu/
-.tools/
-upstream/
 __pycache__/
-.pytest_cache/
-*.egg-info/
-artifacts/
-data/
+profiles/
 runs/
-*.log
-requirements-local.lock.txt

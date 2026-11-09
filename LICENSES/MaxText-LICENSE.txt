@@ -1,3 +1,6 @@
+Portions of llm5/csa.py, llm5/logits.py, llm5/mhc.py and llm5/moe.py are
+modified from MaxText 0.2.5, Copyright 2023–2026 Google LLC.
+
                                  Apache License
                            Version 2.0, January 2004
                         http://www.apache.org/licenses/

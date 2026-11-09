@@ -1,132 +1,124 @@
-"""Reuse the vocabulary projection when differentiating each token tile.
+import math
 
-Adapted from MaxText 0.2.5's vocabulary tiling, copyright 2025–2026 Google LLC,
-Apache-2.0 (see LICENSES/MaxText-LICENSE.txt).
-"""
+import jax
+import jax.numpy as jnp
+from flax import nnx
 
-from llm5.plan import GROUPED_LOGITS_TILES
+from llm5.cfg import short, tiles
 
 
-def single_pass_tiled_loss(model, hidden_states, data, config):
-    import jax
-    import jax.numpy as jnp
-    from flax import nnx
+def loss(model, hidden, data, cfg, count):
     from maxtext.utils.vocabulary_tiling import _is_output_head_param_path
 
-    graphdef, head, other, rest = nnx.split(model, _is_output_head_param_path, nnx.Param, ...)
-    tiles = config.num_vocab_tiling
-    z_multiplier = config.z_loss_multiplier
-    keep_bf16_logits = (
-        config.dtype == jnp.bfloat16 and not config.logits_dot_in_fp32
-        and not config.normalize_embedding_logits and not config.final_logits_soft_cap
-    )
-    device_kind = model.mesh.devices.flat[0].device_kind.casefold()
-    tokens = hidden_states.shape[0] * hidden_states.shape[1]
-    group_gradients = (
-        keep_bf16_logits and tiles == GROUPED_LOGITS_TILES.get(device_kind)
-        and hidden_states.shape[1] <= 1024 and tokens <= 32768
-        and tokens * config.vocab_size <= 2 * 1024**3
-        and hasattr(getattr(model, "decoder", None), "decoder_norm")
-        and hasattr(model.token_embedder, "embedding")
-        and isinstance(model.token_embedder.embedding[...], jax.Array)
-    )
+    graph, head, other, rest = nnx.split(model, _is_output_head_param_path, nnx.Param, ...)
+    z = cfg.z_loss_multiplier
+    grouped = count == 16 and short(hidden.shape[1], hidden.shape[0], model.mesh.size)
 
-    def tile_loss(logits, targets, mask, differentiate):
+    def softmax(logits, ids, mask, grad):
         mask = mask != 0
-        row_max = logits.max(axis=-1).astype(jnp.float32)
-        exp_shifted = jnp.exp(logits.astype(jnp.float32) - row_max[:, None])
-        sum_exp = exp_shifted.sum(axis=-1)
-        log_sum = jnp.log(sum_exp)
-        log_z = row_max + log_sum
+        mx = logits.max(axis=-1).astype(jnp.float32)
+        exp = jnp.exp(logits.astype(jnp.float32) - mx[:, None])
+        total = exp.sum(axis=-1)
+        log_total = jnp.log(total)
+        log_z = mx + log_total
         vocab = logits.shape[-1]
-        valid_targets = (targets >= 0) & (targets < vocab)
-        target_logits = jnp.take_along_axis(logits, jnp.clip(targets, 0, vocab - 1)[:, None], axis=-1)[:, 0]
-        z_loss = z_multiplier * jax.lax.square(log_z)
-        xent = jnp.where(valid_targets, log_sum - (target_logits.astype(jnp.float32) - row_max), 0.0) + z_loss
-        dlogits = None
-        if differentiate:
-            # Divide and apply the token mask once per row, before broadcasting
-            # into the vocabulary-wide fusion that writes the BF16 gradients.
-            scale = jnp.where(mask, (1 + 2 * z_multiplier * log_z) / sum_exp, 0.0)
-            active_targets = jnp.where(mask, targets, -1)
-            target_matches = active_targets[:, None] == jnp.arange(vocab)
-            dlogits = (exp_shifted * scale[:, None] - target_matches).astype(logits.dtype)
-        return (jnp.sum(xent * mask), jnp.sum(z_loss * mask)), dlogits
+        valid = (ids >= 0) & (ids < vocab)
+        target = jnp.take_along_axis(logits, jnp.clip(ids, 0, vocab-1)[:, None], axis=-1)[:, 0]
+        zl = z * jax.lax.square(log_z)
+        ce = jnp.where(valid, log_total - (target.astype(jnp.float32) - mx), 0)
+        dy = None
+        if grad:
+            scale = jnp.where(mask, (1 + 2*z*log_z) / total, 0)
+            labels = jnp.where(mask, ids, -1)[:, None] == jnp.arange(vocab)
+            dy = (exp * scale[:, None] - labels).astype(logits.dtype)
+        return (jnp.sum((ce + zl) * mask), jnp.sum(zl * mask)), dy
 
-    def scan_loss(head, other, rest, hidden, labels, segmentation, differentiate):
+    def run(head, other, rest, x, ids, mask, grad):
         def project(params, x):
-            local = nnx.merge(graphdef, params, other, rest, copy=True)
-            logits = local.logits_from_hidden_states_for_vocab_tiling(x, True, "train")
-            # The tied projection already rounded to BF16 before MaxText's
-            # FP32 cast. Keep the label gather on the smaller representation.
-            return logits.astype(jnp.bfloat16) if keep_bf16_logits else logits
+            net = nnx.merge(graph, params, other, rest, copy=True)
+            return net.logits_from_hidden_states_for_vocab_tiling(x, True, "train").astype(jnp.bfloat16)
 
-        def body(carry, tile):
-            losses, head_grad = carry
-            x, targets, mask = tile
-            if differentiate:
-                logits, project_vjp = jax.vjp(project, head, x)
+        def prepare(params, x):
+            net = nnx.merge(graph, params, other, rest, copy=True)
+            return net.decoder.decoder_norm(x), net.token_embedder.embedding[...].astype(jnp.bfloat16)
+
+        def step(state, tile):
+            ce, zl, dh = state
+            x, ids, mask = tile
+            if grad:
+                logits, vjp = jax.vjp(project, head, x)
             else:
                 logits = project(head, x)
-            (loss, z_loss), dlogits = tile_loss(logits, targets, mask, differentiate)
-            if differentiate:
-                head_update, dx = project_vjp(dlogits)
-                head_grad = jax.tree.map(jnp.add, head_grad, head_update)
-            else:
-                dx = None
-            return ((losses[0] + loss, losses[1] + z_loss), head_grad), dx
+            (a, b), dy = softmax(logits, ids, mask, grad)
+            dx = None
+            if grad:
+                update, dx = vjp(dy)
+                dh = jax.tree.map(jnp.add, dh, update)
+            return (ce+a, zl+b, dh), dx
 
-        def grouped_body(carry, group):
-            losses, head_grad = carry
-            x, targets, mask = group
+        def group(state, group):
+            ce, zl, dh = state
+            x, ids, mask = group
+            flat = x.reshape(-1, x.shape[-1])
+            (y, w), vjp = jax.vjp(prepare, head, flat)
 
-            def prepare(params, inputs):
-                local = nnx.merge(graphdef, params, other, rest, copy=True)
-                return local.decoder.decoder_norm(inputs), local.token_embedder.embedding[...].astype(jnp.bfloat16)
+            def tile(args):
+                y, ids, mask = args
+                logits = jnp.dot(y, w.T, preferred_element_type=jnp.bfloat16)
+                return softmax(logits, ids, mask, True)
 
-            flat_x = x.reshape(-1, x.shape[-1])
-            (normalized, embedding), prepare_vjp = jax.vjp(prepare, head, flat_x)
+            (a, b), dy = jax.lax.map(tile, (y.reshape(x.shape), ids, mask))
+            dy = dy.reshape(flat.shape[0], -1)
+            dx = jnp.dot(dy, w, preferred_element_type=y.dtype)
+            dw = jnp.dot(dy.T, y, preferred_element_type=w.dtype)
+            update, dx = vjp((dx, dw))
+            return (ce+a.sum(), zl+b.sum(), jax.tree.map(jnp.add, dh, update)), dx
 
-            def one_tile(tile):
-                y, ids, valid = tile
-                logits = jnp.dot(y, embedding.T, preferred_element_type=jnp.bfloat16)
-                return tile_loss(logits, ids, valid, True)
-
-            # Keep the FP32 softmax workspace at one tile. Combine four BF16
-            # cotangent tiles for one input GEMM and one embedding update.
-            (loss, z_loss), dlogits = jax.lax.map(one_tile, (normalized.reshape(x.shape), targets, mask))
-            dlogits = dlogits.reshape(flat_x.shape[0], -1)
-            dy = jnp.dot(dlogits, embedding, preferred_element_type=normalized.dtype)
-            dembed = jnp.dot(dlogits.T, normalized, preferred_element_type=embedding.dtype)
-            head_update, dx = prepare_vjp((dy, dembed))
-            head_grad = jax.tree.map(jnp.add, head_grad, head_update)
-            return ((losses[0] + loss.sum(), losses[1] + z_loss.sum()), head_grad), dx
-
-        zero = jnp.zeros((), dtype=jnp.float32)
-        head_grad = jax.tree.map(jnp.zeros_like, head) if differentiate else None
-        inputs = (hidden.reshape(tiles, -1, hidden.shape[-1]),
-                  labels.reshape(tiles, -1), segmentation.reshape(tiles, -1))
-        if differentiate and group_gradients:
-            grouped = jax.tree.map(lambda value: value.reshape(tiles // 4, 4, *value.shape[1:]), inputs)
-            return jax.lax.scan(grouped_body, ((zero, zero), head_grad), grouped)
-        return jax.lax.scan(body, ((zero, zero), head_grad), inputs)
+        x = x.reshape(count, -1, x.shape[-1])
+        inputs = (x, ids.reshape(x.shape[:2]), mask.reshape(x.shape[:2]))
+        zero = jnp.zeros((), jnp.float32)
+        state = (zero, zero, jax.tree.map(jnp.zeros_like, head) if grad else None)
+        if grad and grouped:
+            inputs = jax.tree.map(lambda a: a.reshape(count // 4, 4, *a.shape[1:]), inputs)
+            return jax.lax.scan(group, state, inputs)
+        return jax.lax.scan(step, state, inputs)
 
     @jax.custom_vjp
-    def tiled_loss(head, other, rest, hidden, labels, segmentation):
-        (losses, _), _ = scan_loss(head, other, rest, hidden, labels, segmentation, False)
-        return losses
+    def calc(head, other, rest, x, ids, mask):
+        (ce, zl, _), _ = run(head, other, rest, x, ids, mask, False)
+        return ce, zl
 
-    def forward(head, other, rest, hidden, labels, segmentation):
-        (losses, dhead), dx = scan_loss(head, other, rest, hidden, labels, segmentation, True)
-        return losses, (dhead, dx.reshape(hidden.shape), other, rest)
+    def fwd(head, other, rest, x, ids, mask):
+        (ce, zl, dh), dx = run(head, other, rest, x, ids, mask, True)
+        return (ce, zl), (dh, dx.reshape(x.shape), other, rest)
 
-    def backward(residuals, cotangents):
-        dhead, dx, other, rest = residuals
-        scale, _ = cotangents  # z-loss is already included in the first output.
-        dhead = jax.tree.map(lambda g: (g * scale).astype(g.dtype), dhead)
-        dx = (dx * scale).astype(dx.dtype)
-        # Explicit zero pytrees preserve the cotangent layout of scanned parameters.
-        return dhead, jax.tree.map(jnp.zeros_like, other), jax.tree.map(jnp.zeros_like, rest), dx, None, None
+    def bwd(saved, dy):
+        dh, dx, other, rest = saved
+        scale = dy[0]
+        return (jax.tree.map(lambda g: (g * scale).astype(g.dtype), dh),
+                jax.tree.map(jnp.zeros_like, other), jax.tree.map(jnp.zeros_like, rest),
+                (dx * scale).astype(dx.dtype), None, None)
 
-    tiled_loss.defvjp(forward, backward)
-    return tiled_loss(head, other, rest, hidden_states, data["targets"], data["targets_segmentation"])
+    calc.defvjp(fwd, bwd)
+    return calc(head, other, rest, hidden, data["targets"], data["targets_segmentation"])
+
+
+def patch(train):
+    from maxtext.configs.pyconfig import HyperParameters
+
+    native = train.vocab_tiling_nnx_loss
+
+    def tiled(model, hidden, data, config, is_train):
+        devices = model.mesh.size
+        tokens = math.prod(hidden.shape[:-1]) // devices
+        limit = config.num_vocab_tiling
+        if not is_train:
+            limit = max(1, math.ceil(limit * min(1, config.eval_per_device_batch_size / config.per_device_batch_size)))
+        count = tiles(tokens, limit)
+        if is_train and devices == 1:
+            return loss(model, hidden, data, config, count)
+        if count != config.num_vocab_tiling:
+            config = HyperParameters(config._pydantic_config.model_copy(update={"num_vocab_tiling": count}))
+        return native(model, hidden, data, config, is_train)
+
+    train.vocab_tiling_nnx_loss = tiled

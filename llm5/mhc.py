@@ -1,16 +1,17 @@
-"""Fuse mHC-lite's two pre-branch gradient kernels.
+from functools import partial
 
-Adapted from MaxText 0.2.5 (Google LLC, Apache-2.0).
-"""
+import jax
+import jax.numpy as jnp
+from jax.ad_checkpoint import checkpoint_name
+
+from llm5.cfg import short
 
 
-def use_fused_pre_backward(shape, block_size):
+def fast(shape, block_size):
     return tuple(shape) == (32, 1024, 4, 2048) and block_size == 128
 
 
-def fused_pre_backward(config, permutations, saved, x, weights, cotangents):
-    import jax
-    import jax.numpy as jnp
+def fused(config, permutations, saved, x, weights, cotangents):
     from jax.experimental import pallas as pl
     from jax.experimental.pallas import tpu as pltpu
     from maxtext.kernels.mhc import common
@@ -19,7 +20,6 @@ def fused_pre_backward(config, permutations, saved, x, weights, cotangents):
     d_layer_input, (d_x_acc, d_h_post, d_residual) = cotangents
     batch, length, streams, width = x.shape
     tokens = batch * length
-    # Budget VMEM for the extra layer-gradient tile alongside the coefficient VJP.
     block = min(config.bwd_block_size, 64)
     x_flat = x.reshape(tokens, streams, width)
     d_x_acc = d_x_acc.reshape(x_flat.shape)
@@ -43,7 +43,6 @@ def fused_pre_backward(config, permutations, saved, x, weights, cotangents):
         params = jax.tree.map(lambda ref: ref[...], coeff_refs)
         _, coeff_vjp = jax.vjp(coeff_fn, tile, params)
         dx_coeff, d_coeffs = coeff_vjp(common.MhcCoeffOutputs(d_h_pre, d_post_ref[...], d_res_ref[...]))
-        # Keep the rounding boundary between the original two backward kernels.
         accumulated = (dx_apply.astype(jnp.float32) + d_acc_ref[...].astype(jnp.float32)).astype(dx_ref.dtype)
         dx_ref[...] = (dx_coeff.astype(jnp.float32) + accumulated.astype(jnp.float32)).astype(dx_ref.dtype)
 
@@ -82,7 +81,7 @@ def fused_pre_backward(config, permutations, saved, x, weights, cotangents):
             ),
             compiler_params=pltpu.CompilerParams(vmem_limit_bytes=config.vmem_limit_bytes),
             interpret=config.interpret,
-            name="llm5_mhc_pre_bwd_fused",
+            name="mhc_pre_bwd",
         )(*token_inputs, permutations, coeffs)
 
     _, phi_vjp = jax.vjp(common.fold_norm_scale, weights.norm_scale, weights.pre_alpha,
@@ -100,3 +99,105 @@ def fused_pre_backward(config, permutations, saved, x, weights, cotangents):
         res_bias=d_coeffs.res_bias.astype(weights.res_bias.dtype),
         res_scale=d_coeffs.res_scale.astype(weights.res_scale.dtype),
     )
+
+
+def row_dot(x, y):
+    return jnp.einsum("bsd,bsd->bs", x, y, preferred_element_type=jnp.float32)[..., None]
+
+
+def norm_fwd(x, scale, eps):
+    inv = jax.lax.rsqrt(row_dot(x, x) / x.shape[-1] + eps)
+    return x * inv.astype(x.dtype) * scale, (x, scale, inv)
+
+
+@partial(jax.custom_vjp, nondiff_argnums=(2,))
+def norm(x, scale, eps):
+    return norm_fwd(x, scale, eps)[0]
+
+
+def norm_bwd(eps, saved, dy):
+    x, scale, inv = saved
+    inv = inv.astype(x.dtype)
+    y = x * inv
+    dy_scale = dy * scale
+    corr = (row_dot(y, dy_scale) / x.shape[-1]).astype(x.dtype)
+    dx = (dy_scale - y * corr) * inv
+    ds = jnp.einsum("bsd,bsd->d", dy, y, preferred_element_type=jnp.float32)
+    return dx, ds.astype(scale.dtype)
+
+
+norm.defvjp(norm_fwd, norm_bwd)
+
+
+def head(self, x):
+    precision = jax.lax.Precision(self.config.matmul_precision)
+
+    def collapse(x):
+        batch, length, streams, width = x.shape
+        x = x.astype(jnp.bfloat16)
+        flat = x.reshape(batch, length, streams * width)
+        rms = row_dot(flat, flat) / flat.shape[-1]
+        w = jnp.asarray(self.hc_fn[...], jnp.bfloat16)
+        h = jnp.einsum("bsd,dk->bsk", flat, w, precision=precision, preferred_element_type=jnp.float32)
+        h *= jax.lax.rsqrt(rms + self.eps)
+        scale = jnp.asarray(self.hc_scale[...], jnp.float32)
+        bias = jnp.asarray(self.hc_base[...], jnp.float32)
+        gate = (jax.nn.sigmoid(h * scale + bias) + self.eps).astype(jnp.bfloat16)
+        return jnp.einsum("bsk,bskd->bsd", gate, x, precision=precision,
+                          preferred_element_type=jnp.float32).astype(self.dtype)
+
+    return jax.checkpoint(collapse)(x)
+
+
+def patch():
+    from maxtext.kernels.mhc import mhc_kernels_bwd as bwd, mhc_kernels_fwd as fwd
+    from maxtext.layers import mhc, nnx_decoders, normalizations
+
+    class Norm(normalizations.RMSNorm):
+        def __call__(self, inputs, out_sharding=None):
+            if inputs.ndim != 3 or out_sharding is not None:
+                return super().__call__(inputs, out_sharding)
+            return norm(inputs, self.scale.get_value().astype(jnp.bfloat16), self.epsilon)
+
+    native_perms = mhc.get_permutation_matrices
+
+    def perms(k):
+        with jax.ensure_compile_time_eval():
+            return native_perms(k)
+
+    native_policy = nnx_decoders.NNXDecoder.get_remat_policy
+    save = jax.checkpoint_policies.save_only_these_names("moe_order", "csa", "mhc_pre")
+
+    def policy(self):
+        cfg = self.config
+        base = native_policy(self)
+        if (getattr(self, "remat_policy_override", None) is None
+                and short(cfg.max_target_length, cfg.per_device_batch_size, self.mesh.size)):
+            return lambda op, *args, **kw: save(op, *args, **kw) or base(op, *args, **kw)
+        return base
+
+    @partial(jax.custom_vjp, nondiff_argnums=(0,))
+    def pre(cfg, x, p, w):
+        return fwd.pre_fwd(x, w, p, cfg)[0]
+
+    def keep(value):
+        return checkpoint_name(value, "mhc_pre")
+
+    def pre_fwd(cfg, x, p, w):
+        (branch, (streams, h, res)), saved = fwd.pre_fwd(x, w, p, cfg)
+        return (keep(branch), (streams, keep(h), keep(res))), (jax.tree.map(keep, saved), x, p, w)
+
+    def pre_bwd(cfg, state, dy):
+        saved, x, p, w = state
+        if fast(x.shape, cfg.bwd_block_size):
+            dx, dw = fused(cfg, p, saved, x, w, dy)
+        else:
+            dx, dw = bwd.pre_op_bwd(cfg, p, (saved, (x, w)), dy)
+        return dx, None, dw
+
+    pre.defvjp(pre_fwd, pre_bwd)
+    fwd._pre_op = pre
+    mhc.get_permutation_matrices = perms
+    mhc.DeepSeek4HyperHead.__call__ = head
+    mhc.RMSNorm = Norm
+    nnx_decoders.NNXDecoder.get_remat_policy = policy
