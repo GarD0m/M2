@@ -161,7 +161,7 @@ STAGES = (
 
 
 def short(length, batch):
-    return length <= 1024 and length * batch <= 16384
+    return length <= 1024 and length * batch <= 32768
 
 
 def tiles(tokens, limit):
@@ -175,7 +175,7 @@ def configs(devices, root=RUN / "train", prefix=NAME, specs=STAGES):
     stages = []
     end = 0
     for length, budget, batch, _, _ in specs:
-        local = max(1, min(batch, 16384 // length))
+        local = max(1, min(batch, 32768 // length))
         micro = local * devices
         ga = max(1, round(batch * 16 / micro))
         end += max(1, round(budget / ((length - 1) * micro * ga)))
@@ -203,24 +203,26 @@ def configs(devices, root=RUN / "train", prefix=NAME, specs=STAGES):
             init_weights_seed=42,
             load_full_state_path=previous,
             use_mhc_pallas_kernel=devices == 1,
-            optimizer_memory_host_offload=devices == 1 and length == 32768,
+            optimizer_memory_host_offload=devices == 1,
             num_vocab_tiling=16 if devices == 1 else tiles(tokens, max(1, min(16, tokens // 2048))),
         )
         head_bytes = max(local, 1) * length * (length // 4) * 4
         heads = min(8, max(1, (128 * 1024**2) // head_bytes))
         cfg["csa_qk_head_chunk_size"] = 1 << (heads.bit_length() - 1)
         if short(length, local):
-            cfg.update(context="device", moe_mlpwi_0="device", moe_mlpwi_1="device", moe_x_sorted="device")
-            if devices == 1:
-                cfg.update(
-                    use_gmm_v2_heuristic_tiling=False,
-                    wi_tile_fwd_batch_seq=128, wi_tile_fwd_embed_dim=2048, wi_tile_fwd_mlp_dim=4096,
-                    wi_tile_dlhs_batch_seq=128, wi_tile_dlhs_embed_dim=2048, wi_tile_dlhs_mlp_dim=4096,
-                    wi_tile_drhs_batch_seq=256, wi_tile_drhs_embed_dim=2048, wi_tile_drhs_mlp_dim=2048,
-                    wo_tile_fwd_batch_seq=128, wo_tile_fwd_embed_dim=2048, wo_tile_fwd_mlp_dim=2048,
-                    wo_tile_dlhs_batch_seq=128, wo_tile_dlhs_embed_dim=2048, wo_tile_dlhs_mlp_dim=2048,
-                    wo_tile_drhs_batch_seq=256, wo_tile_drhs_embed_dim=2048, wo_tile_drhs_mlp_dim=2048,
-                    mhc_pallas_kernel_bwd_feature_block_size=2048,
-                )
+            cfg["context"] = "device"
+            if tokens <= 16384:
+                cfg.update(moe_mlpwi_0="device", moe_mlpwi_1="device", moe_x_sorted="device")
+        if devices == 1 and length == 1024:
+            cfg.update(
+                use_gmm_v2_heuristic_tiling=False,
+                wi_tile_fwd_batch_seq=128, wi_tile_fwd_embed_dim=2048, wi_tile_fwd_mlp_dim=4096,
+                wi_tile_dlhs_batch_seq=128, wi_tile_dlhs_embed_dim=2048, wi_tile_dlhs_mlp_dim=4096,
+                wi_tile_drhs_batch_seq=256, wi_tile_drhs_embed_dim=2048, wi_tile_drhs_mlp_dim=2048,
+                wo_tile_fwd_batch_seq=128, wo_tile_fwd_embed_dim=2048, wo_tile_fwd_mlp_dim=2048,
+                wo_tile_dlhs_batch_seq=128, wo_tile_dlhs_embed_dim=2048, wo_tile_dlhs_mlp_dim=2048,
+                wo_tile_drhs_batch_seq=256, wo_tile_drhs_embed_dim=2048, wo_tile_drhs_mlp_dim=2048,
+                mhc_pallas_kernel_bwd_feature_block_size=2048,
+            )
         previous = (root / cfg["run_name"] / "checkpoints" / str(end) / "items").as_posix()
         yield cfg
