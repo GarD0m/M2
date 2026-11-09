@@ -175,7 +175,7 @@ def configs(devices, root=RUN / "train", prefix=NAME, specs=STAGES):
     stages = []
     end = 0
     for length, budget, batch, _, _ in specs:
-        local = max(1, min(batch // devices, 16384 // length))
+        local = max(1, min(batch, 16384 // length))
         micro = local * devices
         ga = max(1, round(batch * 16 / micro))
         end += max(1, round(budget / ((length - 1) * micro * ga)))
