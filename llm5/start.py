@@ -1,6 +1,17 @@
 from llm5.train import run, setup
 
 
+def train(cfgs, store):
+    step, name = store.restore()
+    for cfg in cfgs:
+        if cfg["steps"] <= step:
+            continue
+        if cfg["run_name"] == name:
+            cfg = dict(cfg, load_full_state_path="")
+        run(cfg, store)
+        store.finish(cfg["run_name"])
+
+
 def main():
     setup()
     import jax
@@ -9,15 +20,7 @@ def main():
 
     cfgs = list(configs(jax.device_count()))
     with Hub(cfgs) as hub:
-        step, name = hub.restore()
-        for cfg in cfgs:
-            if cfg["steps"] <= step:
-                continue
-            if cfg["run_name"] == name:
-                cfg["load_full_state_path"] = ""
-            run(cfg, hub)
-            hub.send(cfg["run_name"])
-            hub.wait()
+        train(cfgs, hub)
 
 
 if __name__ == "__main__":

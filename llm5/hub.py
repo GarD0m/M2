@@ -2,17 +2,14 @@ import json
 import os
 import shutil
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
 
 from huggingface_hub import CommitOperationAdd, HfApi, hf_hub_download, snapshot_download
 from huggingface_hub.errors import EntryNotFoundError
-from tensorboardX import SummaryWriter
 
 from llm5.cfg import NAME, REPO
-from llm5.data import CURSOR
+from llm5.ckpt import Store
 
 
 def link(src, dst):
@@ -22,13 +19,12 @@ def link(src, dst):
         shutil.copy2(src, dst)
 
 
-class Hub:
+class Hub(Store):
     def __init__(self, cfgs):
-        self.cfgs = {c["run_name"]: c for c in cfgs}
+        super().__init__(cfgs)
         self.api = HfApi(token=os.environ["HF_TOKEN"])
         self.pool = ThreadPoolExecutor(max_workers=1)
         self.jobs = []
-        self.writer = None
         self.index = f"runs/{NAME}/latest.json"
 
     def __enter__(self):
@@ -41,21 +37,12 @@ class Hub:
         finally:
             self.pool.shutdown()
 
-    def dir(self, name):
-        return Path(self.cfgs[name]["base_output_directory"]) / name
-
-    def ckpt(self, name, step):
-        return self.dir(name) / "checkpoints" / str(step)
-
     def download(self, temp, paths, revision=None):
         return snapshot_download(REPO, repo_type="model", local_dir=temp,
                                  allow_patterns=paths, revision=revision, token=self.api.token)
 
     def restore(self):
-        local = [(int(p.name), name) for name in self.cfgs
-                 for p in (self.dir(name) / "checkpoints").glob("[0-9]*")
-                 if p.name.isdigit() and (p / "items").is_dir() and (p / CURSOR).is_file()]
-        best = max(local, default=(0, ""))
+        best = super().restore()
         try:
             path = hf_hub_download(REPO, self.index, repo_type="model", token=self.api.token)
         except EntryNotFoundError:
@@ -98,6 +85,13 @@ class Hub:
             job.result()
         self.jobs.clear()
 
+    def saved(self, name, step):
+        self.send(name, step)
+
+    def finish(self, name):
+        self.send(name)
+        self.wait()
+
     def send(self, name, step=None):
         self.drain()
         src = self.dir(name)
@@ -135,49 +129,3 @@ class Hub:
                                                    for path in (self.index, "latest.json")])
         finally:
             tmp.cleanup()
-
-    @contextmanager
-    def capture(self, name):
-        from maxtext.common import checkpointing as cp
-        from maxtext.utils import max_utils
-
-        save = cp.save_checkpoint
-        maybe = cp.maybe_save_checkpoint
-        close = max_utils.close_summary_writer
-
-        def writer(directory, run_name, enable_tensorboard=True):
-            if enable_tensorboard:
-                self.writer = SummaryWriter(str(self.dir(run_name) / "tensorboard"), flush_secs=10)
-            return self.writer
-
-        def finish(active):
-            try:
-                return close(active)
-            finally:
-                self.writer = None
-
-        def save_step(manager, step, state, config=None, data_iterator=None, force=False):
-            self.drain()
-            saved = save(manager, step, state, config, data_iterator, force)
-            if saved:
-                cp.wait_until_finished(manager)
-                self.send(name, int(step))
-            return saved
-
-        def maybe_step(manager, state, config, iterator, step=None):
-            if step is not None:
-                return maybe(manager, state, config, iterator, step=int(step) + 1)
-            completed = int(state.optimizer.step.get_value())
-            if not self.ckpt(name, completed).is_dir():
-                save_step(manager, completed, state, config, iterator, force=True)
-
-        with (patch.object(cp, "save_checkpoint", save_step),
-              patch.object(cp, "maybe_save_checkpoint", maybe_step),
-              patch.object(max_utils, "initialize_summary_writer", writer),
-              patch.object(max_utils, "close_summary_writer", finish)):
-            try:
-                yield
-            finally:
-                if self.writer is not None:
-                    self.writer.close()
-                    self.writer = None
